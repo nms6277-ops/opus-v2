@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>opus</title>
+    <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+    <header class="bar">
+        <h1>opus <span class="ver">vps-live</span></h1>
+        <div class="conns">
+            <span id="conn-binance" class="conn">binance: <b>...</b></span>
+            <span id="conn-binance-private" class="conn">private: <b>...</b></span>
+            <span id="conn-bybit" class="conn">bybit: <b>...</b></span>
+            <span id="ws-age" class="conn muted">ws age: <b>-</b></span>
+        </div>
+        <div class="mode-ctrl">
+            <span class="label">mode</span>
+            <button data-mode="collect" class="mode-btn">COLLECT</button>
+            <button data-mode="paper" class="mode-btn">PAPER</button>
+            <button data-mode="live" class="mode-btn danger">LIVE</button>
+        </div>
+        <div class="model-ctrl">
+            <span class="label">model</span>
+            <select id="model-select"></select>
+            <span id="model-horizons" class="muted-text">-</span>
+            <button id="model-load" type="button">load</button>
+        </div>
+    </header>
+
+    <main>
+        <section id="emergency" class="banner hidden">
+            <b>EMERGENCY STOP</b> <span id="emergency-reason"></span>
+            <button id="emergency-clear" type="button">clear</button>
+        </section>
+
+        <section class="card">
+            <div class="section-head">
+                <h2>runtime profile</h2>
+                <button id="emergency-stop" class="danger-btn" type="button">STOP + FLATTEN</button>
+            </div>
+            <div id="settings-caps" class="caps"></div>
+            <form id="settings-form" class="settings-form">
+                <label>leverage<input id="s-leverage" type="number" step="1" min="1" /></label>
+                <label>max live symbols<input id="s-max-live" type="number" step="1" min="1" /></label>
+                <label>daily loss $<input id="s-daily-loss" type="number" step="0.1" min="0" /></label>
+                <label>12h loss $<input id="s-12h-loss" type="number" step="0.1" min="0" /></label>
+                <label>symbol loss $<input id="s-symbol-loss" type="number" step="0.01" min="0" /></label>
+                <label>probation notional $<input id="s-probation-notional" type="number" step="1" min="0" /></label>
+                <label>active notional $<input id="s-active-notional" type="number" step="1" min="0" /></label>
+                <label>min gross bp<input id="s-min-gross" type="number" step="0.1" min="0" /></label>
+                <label>giveback %<input id="s-global-giveback" type="number" step="1" min="0" max="100" /></label>
+                <label>symbol giveback %<input id="s-symbol-giveback" type="number" step="1" min="0" max="100" /></label>
+                <label>loss streak<input id="s-loss-streak" type="number" step="1" min="1" /></label>
+                <label>rolling trades<input id="s-rolling-trades" type="number" step="1" min="1" /></label>
+                <label>rolling min WR %<input id="s-rolling-wr" type="number" step="1" min="0" max="100" /></label>
+                <label>rolling loss bp<input id="s-rolling-loss-bp" type="number" step="1" min="0" /></label>
+                <label>rolling DD %<input id="s-rolling-dd" type="number" step="1" min="0" max="100" /></label>
+                <label>probation trades<input id="s-probation-trades" type="number" step="1" min="1" /></label>
+                <label>cooldown hours<input id="s-cooldown-hours" type="number" step="1" min="1" /></label>
+                <button type="submit">apply</button>
+            </form>
+        </section>
+
+        <section class="card">
+            <h2>trading watchlist</h2>
+            <form id="add-form" class="add-form">
+                <input id="add-symbol" placeholder="BTCUSDT" autocomplete="off" required />
+                <input id="add-size" type="number" min="1" step="1" placeholder="$ position" required />
+                <button type="submit">+ add</button>
+            </form>
+            <table id="watchlist" class="grid">
+                <thead>
+                    <tr>
+                        <th>symbol</th>
+                        <th>mode</th>
+                        <th>state</th>
+                        <th>size $</th>
+                        <th>notional $</th>
+                        <th>gross bp</th>
+                        <th>dd %</th>
+                        <th>roll WR</th>
+                        <th>roll net</th>
+                        <th>trades</th>
+                        <th>w/l</th>
+                        <th>loss seq</th>
+                        <th>bid</th>
+                        <th>ask</th>
+                        <th>spread bp</th>
+                        <th>snaps</th>
+                        <th>pos</th>
+                        <th>rPnL</th>
+                        <th>12h PnL</th>
+                        <th>block</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </section>
+
+        <section class="card">
+            <h2>open trades <span id="trader-meta" class="ver"></span></h2>
+            <div class="stats">
+                <span>open: <b id="trader-open">0</b></span>
+                <span>trades: <b id="trader-count">0</b></span>
+                <span>win rate: <b id="trader-winrate">0%</b></span>
+                <span>daily PnL: <b id="trader-pnl">$0.00</b></span>
+                <span>predictor: <b id="trader-predictor">-</b></span>
+            </div>
+            <table id="trades" class="grid">
+                <thead>
+                    <tr>
+                        <th>symbol</th>
+                        <th>side</th>
+                        <th>qty</th>
+                        <th>entry</th>
+                        <th>conf</th>
+                        <th>age, s</th>
+                        <th>horizon</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </section>
+
+        <section class="card">
+            <h2>safety guards</h2>
+            <form id="guards-form" class="guards-form">
+                <label>daily loss limit $<input id="g-dll" type="number" step="0.5" min="0" /></label>
+                <label>12h loss limit $<input id="g-12h" type="number" step="0.5" min="0" /></label>
+                <label>symbol loss limit $<input id="g-symbol" type="number" step="0.01" min="0" /></label>
+                <label>max position $<input id="g-mpu" type="number" step="1" min="0" /></label>
+                <label>max live symbols<input id="g-mls" type="number" step="1" min="1" /></label>
+                <label>max orders/min<input id="g-mop" type="number" step="1" min="1" /></label>
+                <button type="submit">apply</button>
+            </form>
+            <div class="stats">
+                <span>daily PnL: <b id="daily-pnl">$0.00</b></span>
+                <span>12h PnL: <b id="pnl-12h">$0.00</b></span>
+                <span>daily orders: <b id="daily-orders">0</b></span>
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
