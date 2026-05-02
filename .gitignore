@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtualenvs
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Runtime / secrets
+.env
+.env.local
+*.log
+logs/*
+!logs/.gitkeep
+
+# Data (too big for git)
+data/*
+!data/.gitkeep
+
+# Models / ML caches
+models/
+ml_cache/
+!models/.gitkeep
+
+# Reports (large HTML, regenerated)
+reports/*
+!reports/.gitkeep
+
+# Runtime mutable state
+runtime_settings.json
+runtime_model.json
+
+# Test artifacts
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage

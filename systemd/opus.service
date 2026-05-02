@@ -1,0 +1,27 @@
+[Unit]
+Description=opus — microstructure trading bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/home/%i/opus
+EnvironmentFile=/home/%i/opus/.env
+ExecStart=/home/%i/opus/.venv/bin/python -m backend.main
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGINT
+StandardOutput=append:/home/%i/opus/logs/systemd.log
+StandardError=append:/home/%i/opus/logs/systemd.log
+
+# Security hardening (adjust if your layout differs)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+RestrictNamespaces=true
+
+[Install]
+WantedBy=multi-user.target
