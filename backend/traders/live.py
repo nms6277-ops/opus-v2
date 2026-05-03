@@ -101,9 +101,18 @@ class LiveTrader(Trader):
         await self._flatten(symbol)
 
     async def emergency_flatten(self) -> None:
-        """Best-effort flatten for every symbol managed by this trader."""
+        """Best-effort flatten for every symbol with potential exposure.
 
-        for sym in self._managed_symbols():
+        Includes symbols still flagged ``execution_mode=="live"`` AND any
+        symbol with a locally-tracked open position. The latter covers
+        operator workflows where a symbol is switched live→paper while a
+        real Binance position is still open: ``_managed_symbols`` would
+        skip it, but the actual position is in ``self._positions`` and
+        must still be closed.
+        """
+
+        symbols = set(self._managed_symbols()) | set(self._positions.keys())
+        for sym in symbols:
             await self.flatten_symbol(sym)
 
     async def on_snapshot(self, symbol: str, snap: dict[str, Any]) -> None:

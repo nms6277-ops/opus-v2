@@ -217,6 +217,33 @@ async def test_live_trader_closes_open_position_on_opposing_signal():
 
 
 @pytest.mark.asyncio
+async def test_emergency_flatten_includes_positions_after_live_to_paper_switch():
+    """A position must still be flattened even if the symbol was switched to paper."""
+
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+    rest.positions["UBUSDT"] = 6.0
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    await trader.start()
+
+    # Open a real position, then drop the symbol to paper without flattening
+    # (simulates a stale process state where flatten failed earlier).
+    await trader.on_snapshot("UBUSDT", _snap())
+    assert "UBUSDT" in trader._positions
+    state.symbols["UBUSDT"].execution_mode = "paper"
+    state.symbols["UBUSDT"].live_state = "paper"
+
+    # _managed_symbols would now return [] — but emergency_flatten must
+    # still cover the open position via _positions.
+    assert "UBUSDT" not in trader._managed_symbols()
+    await trader.emergency_flatten()
+    assert any(sym == "UBUSDT" for sym, _ in rest.flattened)
+    assert "UBUSDT" not in trader._positions
+
+
+@pytest.mark.asyncio
 async def test_live_trader_runs_exit_checks_even_after_symbol_disabled():
     """Stranded positions must still get stop-loss/timeout exits if mode flips."""
 

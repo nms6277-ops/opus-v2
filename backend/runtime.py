@@ -432,6 +432,16 @@ class Runtime:
             stats.live_state = "paper"
             stats.current_notional_usd = 0.0
             stats.block_reason = ""
+            # Mirror disable_symbol: any real Binance position must be
+            # flattened when the operator drops the symbol back to paper,
+            # otherwise leverage exposure persists with no automated exits
+            # owning it (PaperTrader doesn't manage real positions, and
+            # emergency_flatten on shutdown would only re-find it via the
+            # _positions dict — too late if the process restarts first).
+            if isinstance(self._trader, LiveTrader):
+                await self._trader.flatten_symbol(symbol)
+            elif self._trader is not None:
+                await self._trader.cancel_all(symbol)
         else:
             raise ValueError("execution_mode must be paper or live")
         return {"symbol": symbol, "execution_mode": stats.execution_mode}
