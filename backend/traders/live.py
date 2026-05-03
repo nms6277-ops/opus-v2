@@ -220,7 +220,14 @@ class LiveTrader(Trader):
             record_pnl(self.state.guards, realized_pnl, symbol=symbol)
 
         if reduce_only:
-            stats.fills_count += 1
+            # Only count actual trade events; ``NEW`` / ``CANCELLED`` /
+            # ``EXPIRED`` ORDER_TRADE_UPDATE rows for the resting STOP/TP
+            # would otherwise inflate ``fills_count`` (every armed
+            # protective fires a ``NEW`` and a ``CANCELLED`` even when no
+            # trade happened).
+            exec_type = str(order.get("x", "")).upper()
+            if exec_type == "TRADE" or status in {"PARTIALLY_FILLED", "FILLED"}:
+                stats.fills_count += 1
             close_key = (symbol, client_order_id or str(order.get("i") or ""))
             if realized_pnl:
                 self._close_order_pnl[close_key] = self._close_order_pnl.get(close_key, 0.0) + realized_pnl
@@ -294,6 +301,23 @@ class LiveTrader(Trader):
             if not position_amt:
                 self._positions.pop(symbol, None)
 
+    def _warm_predictor_buffer(self, symbol: str, snap: dict[str, Any]) -> None:
+        """Push a snapshot row into the predictor's history without predicting.
+
+        Called from ``on_snapshot`` early-return paths (private-WS down,
+        symbol switched to paper, etc.) so that lag returns / rolling
+        volatility / OFI features stay continuous through outages. The
+        normal trade path uses ``Predictor.predict`` which itself pushes
+        the row — we must NOT call both for the same snapshot or every
+        derived feature is corrupted by a duplicated row.
+        """
+        if self.predictor is None or not getattr(self.predictor, "enabled", False):
+            return
+        try:
+            self.predictor.update(symbol, snap)
+        except Exception as e:
+            log.warning("live: predictor.update(%s) failed: %s", symbol, e)
+
     @staticmethod
     def _net_bp_from_realized(stats, pnl_usd: float, qty: float, price: float) -> float:
         notional = qty * price if qty > 0 and price > 0 else float(stats.current_notional_usd or 0.0)
@@ -336,9 +360,16 @@ class LiveTrader(Trader):
             return
 
         if stats.execution_mode != "live" or stats.live_state not in {"probation_live", "active_live"}:
+            # Even when this symbol is currently NOT trading we still need
+            # to warm the predictor's history buffer; otherwise lag /
+            # rolling / OFI features compute across a discontinuity the
+            # moment the symbol is enabled. Same reasoning applies on
+            # private-WS outage below.
+            self._warm_predictor_buffer(symbol, snap)
             return
 
         if not self._private_ws_ready():
+            self._warm_predictor_buffer(symbol, snap)
             self._reject_symbol(symbol, "private ws not ready")
             return
         if self.predictor is None or not getattr(self.predictor, "enabled", False):

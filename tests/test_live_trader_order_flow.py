@@ -738,3 +738,126 @@ async def test_on_order_update_cancels_protective_orders_after_exchange_close():
     # Allow the create_task'd cancel_all to run on the test loop.
     await asyncio.sleep(0)
     assert "UBUSDT" in [s.upper() for s in rest.cancelled]
+
+
+@pytest.mark.asyncio
+async def test_on_order_update_does_not_count_new_or_cancelled_as_fills():
+    """``NEW`` / ``CANCELLED`` events for resting STOP/TP must not bump
+    ``fills_count`` \u2014 only actual trade executions count."""
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    initial_fills = state.symbols["UBUSDT"].fills_count
+
+    for status, exec_type in [("NEW", "NEW"), ("CANCELLED", "CANCELED"), ("EXPIRED", "EXPIRED")]:
+        trader.on_order_update(
+            {
+                "e": "ORDER_TRADE_UPDATE",
+                "o": {
+                    "s": "UBUSDT",
+                    "S": "SELL",
+                    "X": status,
+                    "x": exec_type,
+                    "c": f"OPUS_SL_UBUSDT_{status}",
+                    "i": 1000 + hash(status) % 1000,
+                    "t": "0",
+                    "z": "0",
+                    "ap": "0",
+                    "rp": "0",
+                    "R": True,
+                },
+            }
+        )
+
+    assert state.symbols["UBUSDT"].fills_count == initial_fills, (
+        "non-trade ORDER_TRADE_UPDATE events must not bump fills_count"
+    )
+
+    # Sanity: a real TRADE event still counts.
+    trader.on_order_update(
+        {
+            "e": "ORDER_TRADE_UPDATE",
+            "o": {
+                "s": "UBUSDT",
+                "S": "SELL",
+                "X": "PARTIALLY_FILLED",
+                "x": "TRADE",
+                "c": "OPUS_FLATTEN_UBUSDT_42",
+                "i": 4242,
+                "t": 4242,
+                "z": "1.0",
+                "ap": "1.0",
+                "rp": "0.0",
+                "R": True,
+            },
+        }
+    )
+    assert state.symbols["UBUSDT"].fills_count == initial_fills + 1
+
+
+@pytest.mark.asyncio
+async def test_on_snapshot_warms_predictor_when_private_ws_down():
+    """Even when private WS is stale and entries are blocked, the predictor's
+    history buffer must keep receiving snapshots so that lag / rolling
+    features stay continuous when the WS recovers."""
+
+    class CountingPredictor:
+        enabled = True
+
+        def __init__(self):
+            self.update_calls = 0
+            self.predict_calls = 0
+
+        def update(self, symbol, snap):
+            self.update_calls += 1
+
+        def predict(self, symbol, snap):
+            self.predict_calls += 1
+            self.update(symbol, snap)
+            return None
+
+    state = _state_with_symbol(live=True)
+    state.binance_private_connected = False  # private WS down
+    rest = FakeRest()
+    pred = CountingPredictor()
+    trader = LiveTrader(state, predictor=pred, rest_client=rest, runtime_settings=RuntimeSettings())
+    await trader.start()
+
+    await trader.on_snapshot("UBUSDT", _snap())
+    await trader.on_snapshot("UBUSDT", _snap())
+
+    # Both snapshots must have been pushed exactly once (no double-push).
+    assert pred.update_calls == 2
+    # And no entry was attempted.
+    assert rest.orders == []
+
+
+@pytest.mark.asyncio
+async def test_on_snapshot_warms_predictor_when_symbol_paper():
+    """Symbol switched to paper while LIVE mode is active: predictor buffer
+    must keep warming so it is ready when the symbol is re-enabled."""
+
+    class CountingPredictor:
+        enabled = True
+
+        def __init__(self):
+            self.update_calls = 0
+
+        def update(self, symbol, snap):
+            self.update_calls += 1
+
+        def predict(self, symbol, snap):
+            self.update(symbol, snap)
+            return None
+
+    state = _state_with_symbol(live=False)  # execution_mode == "paper"
+    rest = FakeRest()
+    pred = CountingPredictor()
+    trader = LiveTrader(state, predictor=pred, rest_client=rest, runtime_settings=RuntimeSettings())
+    await trader.start()
+
+    await trader.on_snapshot("UBUSDT", _snap())
+    assert pred.update_calls == 1
+    assert rest.orders == []
