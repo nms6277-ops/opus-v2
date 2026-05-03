@@ -114,6 +114,7 @@ class Settings(BaseSettings):
     hard_max_live_symbols: int = Field(5, ge=1)
     hard_max_notional_usd: float = Field(20.0, ge=0.0)
     hard_max_leverage: int = Field(10, ge=1)
+    hard_max_orders_per_min: int = Field(120, ge=1)
 
     # Telegram notifications.
     telegram_bot_token: str = ""

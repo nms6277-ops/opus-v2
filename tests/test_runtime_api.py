@@ -130,6 +130,7 @@ def test_post_guards_clamps_to_hard_caps(monkeypatch):
             "symbol_loss_limit_usd": 999.0,
             "max_position_usd": 999.0,
             "max_live_symbols": 999,
+            "max_orders_per_min": 100_000,
         },
     )
 
@@ -140,6 +141,7 @@ def test_post_guards_clamps_to_hard_caps(monkeypatch):
     assert applied["symbol_loss_limit_usd"] == settings.hard_symbol_loss_usd
     assert applied["max_position_usd"] == settings.hard_max_notional_usd
     assert applied["max_live_symbols"] == settings.hard_max_live_symbols
+    assert applied["max_orders_per_min"] == settings.hard_max_orders_per_min
     # And the global state is consistent with what was applied.
     assert app_state.guards.daily_loss_limit_usd == settings.hard_daily_loss_usd
     assert app_state.guards.max_position_usd == settings.hard_max_notional_usd

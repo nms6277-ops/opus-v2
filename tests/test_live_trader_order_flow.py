@@ -217,6 +217,49 @@ async def test_live_trader_closes_open_position_on_opposing_signal():
 
 
 @pytest.mark.asyncio
+async def test_live_trader_records_pnl_and_realized_exactly_once_even_if_flatten_fails():
+    """Even if the Binance REST flatten errors, PnL must record exactly once."""
+
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+    # Make market_close_position blow up to simulate a Binance / network error.
+    rest.positions["UBUSDT"] = 6.0
+
+    async def boom(symbol, position_amt):
+        raise RuntimeError("simulated REST failure")
+
+    rest.market_close_position = boom
+
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    await trader.start()
+
+    await trader.on_snapshot("UBUSDT", _snap())
+    assert "UBUSDT" in trader._positions
+    pos = trader._positions["UBUSDT"]
+
+    # First close attempt — flatten will raise but be swallowed.
+    snap = _snap()
+    snap["ts_ms"] = pos.ts_open_ms + pos.horizon_ms + 1000
+    await trader.on_snapshot("UBUSDT", snap)
+
+    pnl_after_first = state.symbols["UBUSDT"].realized_pnl
+    daily_after_first = state.guards.daily_pnl
+    fills_after_first = state.symbols["UBUSDT"].fills_count
+    assert "UBUSDT" not in trader._positions, "position must be popped before flatten"
+
+    # Subsequent snapshots must NOT re-record PnL since the position is gone.
+    snap2 = dict(snap)
+    snap2["ts_ms"] += 1000
+    await trader.on_snapshot("UBUSDT", snap2)
+
+    assert state.symbols["UBUSDT"].realized_pnl == pnl_after_first
+    assert state.guards.daily_pnl == daily_after_first
+    assert state.symbols["UBUSDT"].fills_count == fills_after_first
+
+
+@pytest.mark.asyncio
 async def test_live_trader_stop_cancels_and_flattens_managed_symbols():
     state = _state_with_symbol(live=True)
     rest = FakeRest()

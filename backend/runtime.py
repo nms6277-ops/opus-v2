@@ -252,7 +252,12 @@ class Runtime:
 
     def _make_trader(self, mode: Mode) -> Trader:
         if mode == Mode.LIVE:
-            return LiveTrader(self.state, predictor=self._predictor, runtime_settings=self.runtime_settings)
+            return LiveTrader(
+                self.state,
+                predictor=self._predictor,
+                runtime_settings=self.runtime_settings,
+                on_risk_event=self._on_risk_event,
+            )
         # COLLECT and PAPER both use PaperTrader; in COLLECT mode the snapshot
         # loop just doesn't call ``on_snapshot``.
         return PaperTrader(

@@ -158,7 +158,7 @@ def set_guards(body: SetGuardReq, _auth: Annotated[None, Depends(_auth)]) -> dic
     if body.max_live_symbols is not None:
         g.max_live_symbols = min(body.max_live_symbols, settings.hard_max_live_symbols)
     if body.max_orders_per_min is not None:
-        g.max_orders_per_min = body.max_orders_per_min
+        g.max_orders_per_min = min(body.max_orders_per_min, settings.hard_max_orders_per_min)
     return {
         "ok": True,
         "applied": {

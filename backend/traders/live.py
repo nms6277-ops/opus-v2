@@ -8,6 +8,7 @@ emergency flatten for managed symbols.
 from __future__ import annotations
 
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +18,7 @@ from backend.exchanges.binance_rest import BinanceRest, get_client
 from backend.log import get_logger
 from backend.ml.labels import parse_horizon_ms
 from backend.safety.guards import OrderIntent, check, record_order_sent, record_pnl
+from backend.safety.regime import RiskEvent, record_trade_outcome
 from backend.settings_store import RuntimeSettings
 from backend.state import AppState
 from backend.traders.base import Trader
@@ -58,11 +60,13 @@ class LiveTrader(Trader):
         predictor: Predictor | None = None,
         rest_client: BinanceRest | None = None,
         runtime_settings: RuntimeSettings | None = None,
+        on_risk_event: Callable[[RiskEvent], Awaitable[None]] | None = None,
     ) -> None:
         self.state = state
         self.predictor = predictor
         self.rest = rest_client or get_client()
         self.runtime_settings = runtime_settings or RuntimeSettings()
+        self._on_risk_event = on_risk_event
         self._running = False
         self._leveraged_symbols: set[str] = set()
         self._positions: dict[str, _LivePosition] = {}
@@ -209,7 +213,8 @@ class LiveTrader(Trader):
         record_order_sent(self.state.guards)
         stats.position_base = qty if side == "BUY" else -qty
         stats.position_entry = entry_price
-        stats.fills_count += 1
+        # ``fills_count`` is incremented in ``_maybe_close`` after the
+        # round-trip completes, matching the PaperTrader semantics.
         log.info("live: OPEN %s %s qty=%.8f notional=$%.2f", side, symbol, qty, notional)
 
     async def _maybe_close(self, symbol: str, snap: dict[str, Any], pred: Any) -> None:
@@ -260,7 +265,35 @@ class LiveTrader(Trader):
             pnl_usd,
             held_ms,
         )
+
+        # Pop the position from local tracking BEFORE attempting the
+        # Binance REST flatten. ``_flatten`` swallows REST errors, so if
+        # we left the entry in ``self._positions`` the next snapshot
+        # would re-fire the same exit and double-count PnL on every
+        # subsequent tick. The Binance position itself, if the REST call
+        # failed, will be reconciled on next startup or via
+        # ``emergency_flatten``.
+        self._positions.pop(symbol, None)
+
         record_pnl(self.state.guards, pnl_usd, symbol=symbol)
+        stats = self.state.symbols.get(symbol)
+        if stats is not None:
+            stats.realized_pnl += pnl_usd
+            stats.fills_count += 1
+        # Per-symbol regime guards (loss-streak pause, profit giveback,
+        # rolling degradation) only fire if record_trade_outcome is
+        # called with the realised PnL. Without it LIVE mode would have
+        # none of these protections.
+        event = record_trade_outcome(
+            self.state,
+            symbol=symbol,
+            pnl_usd=pnl_usd,
+            net_bp=net_bp,
+            settings=self.runtime_settings,
+        )
+        if event is not None and self._on_risk_event is not None:
+            await self._on_risk_event(event)
+
         await self._flatten(symbol)
 
     @staticmethod
@@ -300,6 +333,11 @@ class LiveTrader(Trader):
         self._leveraged_symbols.add(symbol)
 
     async def _flatten(self, symbol: str) -> None:
+        # Local tracking is cleared by the caller (``_maybe_close``) or
+        # by ``emergency_flatten`` so the REST call below cannot cause a
+        # double-count if it fails. We still pop here defensively for
+        # callers that bypass ``_maybe_close``.
+        self._positions.pop(symbol, None)
         try:
             position_amt = await self.rest.get_open_position_amt(symbol)
             if position_amt:
@@ -309,7 +347,6 @@ class LiveTrader(Trader):
                 stats.position_base = 0.0
                 stats.position_entry = 0.0
                 stats.unrealized_pnl = 0.0
-            self._positions.pop(symbol, None)
         except Exception as e:
             log.warning("flatten(%s) failed: %s", symbol, e)
 
