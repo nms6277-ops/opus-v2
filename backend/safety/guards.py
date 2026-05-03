@@ -53,10 +53,10 @@ def symbol_pnl_12h(guards: Guards, symbol: str) -> float:
 
 
 def _is_live_state(stats) -> bool:
-    return (
-        getattr(stats, "execution_mode", "paper") == "live"
-        and getattr(stats, "live_state", "paper") in {"probation_live", "active_live"}
-    )
+    return getattr(stats, "execution_mode", "paper") == "live" and getattr(stats, "live_state", "paper") in {
+        "probation_live",
+        "active_live",
+    }
 
 
 def reset_if_new_day(guards: Guards) -> None:
@@ -71,8 +71,11 @@ def reset_if_new_day(guards: Guards) -> None:
         guards.pnl_peak_usd = 0.0
         guards.pnl_drawdown_pct = 0.0
         guards.risk_events = []
-        guards.emergency_stopped = False
-        guards.emergency_reason = ""
+        # NOTE: do NOT clear emergency_stopped here. Operator-initiated stops
+        # (and other persistent halts) must survive the UTC day boundary and
+        # only be cleared explicitly via /api/emergency/clear. Daily
+        # loss-triggered emergencies are effectively re-evaluated every
+        # check() because daily_pnl is reset to 0 above.
 
 
 def check(state: AppState, intent: OrderIntent, mode: str) -> str | None:

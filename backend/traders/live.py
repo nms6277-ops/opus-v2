@@ -8,13 +8,15 @@ emergency flatten for managed symbols.
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from backend.config import settings
 from backend.exchanges.binance_filters import round_qty_down, validate_notional
 from backend.exchanges.binance_rest import BinanceRest, get_client
 from backend.log import get_logger
-from backend.safety.guards import OrderIntent, check, record_order_sent
+from backend.ml.labels import parse_horizon_ms
+from backend.safety.guards import OrderIntent, check, record_order_sent, record_pnl
 from backend.settings_store import RuntimeSettings
 from backend.state import AppState
 from backend.traders.base import Trader
@@ -23,6 +25,27 @@ if TYPE_CHECKING:
     from backend.ml.inference import Predictor
 
 log = get_logger(__name__)
+
+
+def _resolve_horizon_ms(spec: str) -> int:
+    try:
+        return parse_horizon_ms(spec)
+    except Exception:
+        log.warning("live: cannot parse trade_horizon=%r; defaulting to 5000ms", spec)
+        return 5_000
+
+
+@dataclass
+class _LivePosition:
+    """Open Binance live position tracked for automated exits."""
+
+    symbol: str
+    side: str  # "long" | "short"
+    qty: float
+    notional_usd: float
+    entry_price: float
+    ts_open_ms: int
+    horizon_ms: int
 
 
 class LiveTrader(Trader):
@@ -42,7 +65,11 @@ class LiveTrader(Trader):
         self.runtime_settings = runtime_settings or RuntimeSettings()
         self._running = False
         self._leveraged_symbols: set[str] = set()
-        self._open_symbols: set[str] = set()
+        self._positions: dict[str, _LivePosition] = {}
+        self._horizon_ms = _resolve_horizon_ms(settings.trade_horizon)
+        self._stop_loss_bp = settings.trade_stop_loss_bp
+        self._taker_fee_bp = settings.taker_fee_bp
+        self._conf_thr = settings.trade_conf_threshold
 
     async def start(self) -> None:
         self._running = True
@@ -76,7 +103,7 @@ class LiveTrader(Trader):
             await self.flatten_symbol(sym)
 
     async def on_snapshot(self, symbol: str, snap: dict[str, Any]) -> None:
-        """Evaluate a live entry on the latest snapshot."""
+        """Evaluate a live entry (or exit) on the latest snapshot."""
 
         if not self._running:
             return
@@ -86,7 +113,14 @@ class LiveTrader(Trader):
             return
         if stats.execution_mode != "live" or stats.live_state not in {"probation_live", "active_live"}:
             return
-        if symbol in self._open_symbols:
+
+        # If we already have an open Binance position for this symbol, the
+        # only thing on_snapshot does is run the exit checks (stop-loss /
+        # opposing-signal / horizon timeout). Skip every other gate so a
+        # transient predictor / WS issue can't strand us in a live trade.
+        if symbol in self._positions:
+            pred = self._prediction(symbol, snap) if self.predictor is not None else None
+            await self._maybe_close(symbol, snap, pred)
             return
 
         if not self._private_ws_ready():
@@ -162,12 +196,79 @@ class LiveTrader(Trader):
             self._reject_symbol(symbol, f"order failed: {e}")
             return
 
-        self._open_symbols.add(symbol)
+        ts_open_ms = int(snap.get("ts_ms", time.time() * 1000))
+        self._positions[symbol] = _LivePosition(
+            symbol=symbol,
+            side="long" if side == "BUY" else "short",
+            qty=qty,
+            notional_usd=qty * entry_price,
+            entry_price=entry_price,
+            ts_open_ms=ts_open_ms,
+            horizon_ms=self._horizon_ms,
+        )
         record_order_sent(self.state.guards)
         stats.position_base = qty if side == "BUY" else -qty
         stats.position_entry = entry_price
         stats.fills_count += 1
         log.info("live: OPEN %s %s qty=%.8f notional=$%.2f", side, symbol, qty, notional)
+
+    async def _maybe_close(self, symbol: str, snap: dict[str, Any], pred: Any) -> None:
+        """Close an open live position if any exit condition fires.
+
+        Mirrors PaperTrader._maybe_close: stop-loss > opposing-signal >
+        horizon timeout. Closing goes through ``_flatten`` which uses a
+        reduce-only MARKET order.
+        """
+
+        pos = self._positions.get(symbol)
+        if pos is None:
+            return
+        now_ms = int(snap.get("ts_ms", time.time() * 1000))
+        held_ms = now_ms - pos.ts_open_ms
+        # Long exits at bid, short exits at ask (taker exit).
+        mark_price = float(snap.get("best_bid" if pos.side == "long" else "best_ask", 0.0))
+        if mark_price <= 0:
+            return
+
+        gross_bp = self._gross_pnl_bp(pos, mark_price)
+        exit_reason: str | None = None
+        if gross_bp <= -self._stop_loss_bp:
+            exit_reason = "stop_loss"
+        elif pred is not None and (
+            (pos.side == "long" and float(pred.confidence) < -self._conf_thr)
+            or (pos.side == "short" and float(pred.confidence) > self._conf_thr)
+        ):
+            exit_reason = "opposing_signal"
+        elif held_ms >= pos.horizon_ms:
+            exit_reason = "timeout"
+
+        if exit_reason is None:
+            net_bp = gross_bp - 2.0 * self._taker_fee_bp
+            stats = self.state.symbols.get(symbol)
+            if stats is not None:
+                stats.unrealized_pnl = pos.notional_usd * (net_bp / 10_000.0)
+            return
+
+        net_bp = gross_bp - 2.0 * self._taker_fee_bp
+        pnl_usd = pos.notional_usd * (net_bp / 10_000.0)
+        log.info(
+            "live: CLOSE %s reason=%s gross=%.2fbp net=%.2fbp pnl=$%.4f held=%dms",
+            symbol,
+            exit_reason,
+            gross_bp,
+            net_bp,
+            pnl_usd,
+            held_ms,
+        )
+        record_pnl(self.state.guards, pnl_usd, symbol=symbol)
+        await self._flatten(symbol)
+
+    @staticmethod
+    def _gross_pnl_bp(pos: _LivePosition, mark_price: float) -> float:
+        if pos.entry_price <= 0:
+            return 0.0
+        sign = 1.0 if pos.side == "long" else -1.0
+        return sign * (mark_price - pos.entry_price) / pos.entry_price * 10_000.0
 
     def _prediction(self, symbol: str, snap: dict[str, Any]):
         try:
@@ -208,7 +309,7 @@ class LiveTrader(Trader):
                 stats.position_base = 0.0
                 stats.position_entry = 0.0
                 stats.unrealized_pnl = 0.0
-            self._open_symbols.discard(symbol)
+            self._positions.pop(symbol, None)
         except Exception as e:
             log.warning("flatten(%s) failed: %s", symbol, e)
 

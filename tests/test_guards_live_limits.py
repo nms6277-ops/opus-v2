@@ -75,3 +75,28 @@ def test_symbol_loss_cap_rejects_only_that_symbol():
     assert blocked is not None
     assert "symbol loss limit" in blocked
     assert allowed is None
+
+
+def test_operator_emergency_stop_survives_utc_day_rollover():
+    """Operator-initiated stops must persist across UTC midnight."""
+    from backend.safety.guards import reset_if_new_day, trip_emergency
+
+    state = AppState()
+    trip_emergency(state.guards, "operator")
+    assert state.guards.emergency_stopped is True
+    assert state.guards.emergency_reason == "operator"
+
+    # Force a "new day" by making the bucket stale.
+    state.guards.day_bucket_utc = 19000101
+    state.guards.daily_pnl = -1.23
+    reset_if_new_day(state.guards)
+
+    # Daily counters reset, but the emergency stop is preserved.
+    assert state.guards.daily_pnl == 0.0
+    assert state.guards.emergency_stopped is True
+    assert state.guards.emergency_reason == "operator"
+
+    # And `check()` keeps blocking until /api/emergency/clear is called.
+    blocked = check(state, _intent("UBUSDT"), "paper")
+    assert blocked is not None
+    assert "emergency stop" in blocked

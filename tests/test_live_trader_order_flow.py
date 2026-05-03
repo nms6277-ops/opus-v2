@@ -171,6 +171,52 @@ async def test_live_trader_blocks_low_expected_gross_symbol():
 
 
 @pytest.mark.asyncio
+async def test_live_trader_closes_open_position_on_horizon_timeout():
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+    rest.positions["UBUSDT"] = 6.0
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    await trader.start()
+
+    # Open a position via the normal entry path.
+    await trader.on_snapshot("UBUSDT", _snap())
+    assert "UBUSDT" in trader._positions
+    pos = trader._positions["UBUSDT"]
+
+    # Snapshot well past the horizon -> timeout exit fires.
+    snap = _snap()
+    snap["ts_ms"] = pos.ts_open_ms + pos.horizon_ms + 1000
+    await trader.on_snapshot("UBUSDT", snap)
+
+    assert "UBUSDT" not in trader._positions
+    assert rest.flattened, "expected reduce-only close via market_close_position"
+
+
+@pytest.mark.asyncio
+async def test_live_trader_closes_open_position_on_opposing_signal():
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+    rest.positions["UBUSDT"] = 6.0
+    pred = FakePredictor(confidence=0.6)
+    trader = LiveTrader(state, predictor=pred, rest_client=rest, runtime_settings=RuntimeSettings())
+    await trader.start()
+
+    await trader.on_snapshot("UBUSDT", _snap())
+    assert "UBUSDT" in trader._positions
+
+    # Predictor flips to strong opposing signal.
+    pred.confidence = -0.6
+    snap = _snap()
+    snap["ts_ms"] = trader._positions["UBUSDT"].ts_open_ms + 100
+    await trader.on_snapshot("UBUSDT", snap)
+
+    assert "UBUSDT" not in trader._positions
+    assert rest.flattened
+
+
+@pytest.mark.asyncio
 async def test_live_trader_stop_cancels_and_flattens_managed_symbols():
     state = _state_with_symbol(live=True)
     rest = FakeRest()

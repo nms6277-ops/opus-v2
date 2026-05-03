@@ -113,6 +113,38 @@ def test_post_runtime_settings_reports_hard_cap_violation(monkeypatch):
     assert "OPUS_HARD_MAX_NOTIONAL_USD" in response.json()["detail"]
 
 
+def test_post_guards_clamps_to_hard_caps(monkeypatch):
+    """`/api/guards` must not let a misconfigured UI widen the safety envelope."""
+    from backend.config import settings
+    from backend.state import app_state
+
+    fake = FakeRuntime()
+    client = _client(fake, monkeypatch)
+
+    # Try to set every limit far above its hard cap.
+    response = client.post(
+        "/api/guards",
+        json={
+            "daily_loss_limit_usd": 999.0,
+            "loss_12h_limit_usd": 999.0,
+            "symbol_loss_limit_usd": 999.0,
+            "max_position_usd": 999.0,
+            "max_live_symbols": 999,
+        },
+    )
+
+    assert response.status_code == 200
+    applied = response.json()["applied"]
+    assert applied["daily_loss_limit_usd"] == settings.hard_daily_loss_usd
+    assert applied["loss_12h_limit_usd"] == settings.hard_12h_loss_usd
+    assert applied["symbol_loss_limit_usd"] == settings.hard_symbol_loss_usd
+    assert applied["max_position_usd"] == settings.hard_max_notional_usd
+    assert applied["max_live_symbols"] == settings.hard_max_live_symbols
+    # And the global state is consistent with what was applied.
+    assert app_state.guards.daily_loss_limit_usd == settings.hard_daily_loss_usd
+    assert app_state.guards.max_position_usd == settings.hard_max_notional_usd
+
+
 def test_set_symbol_execution_mode(monkeypatch):
     fake = FakeRuntime()
     client = _client(fake, monkeypatch)

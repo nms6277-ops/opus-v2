@@ -103,9 +103,7 @@ def status_(_auth: Annotated[None, Depends(_auth)]) -> dict:
 
 
 @router.post("/mode")
-async def set_mode(
-    body: SetModeReq, _auth: Annotated[None, Depends(_auth)]
-) -> dict:
+async def set_mode(body: SetModeReq, _auth: Annotated[None, Depends(_auth)]) -> dict:
     await get_runtime().set_mode(body.mode)
     return {"ok": True, "mode": body.mode.value}
 
@@ -116,9 +114,7 @@ def watchlist(_auth: Annotated[None, Depends(_auth)]) -> list[dict]:
 
 
 @router.post("/watchlist/add")
-async def add_symbol(
-    body: AddSymbolReq, _auth: Annotated[None, Depends(_auth)]
-) -> dict:
+async def add_symbol(body: AddSymbolReq, _auth: Annotated[None, Depends(_auth)]) -> dict:
     if body.position_size_usd > app_state.guards.max_position_usd:
         raise HTTPException(
             status_code=400,
@@ -132,9 +128,7 @@ async def add_symbol(
 
 
 @router.post("/watchlist/remove")
-async def remove_symbol(
-    body: dict, _auth: Annotated[None, Depends(_auth)]
-) -> dict:
+async def remove_symbol(body: dict, _auth: Annotated[None, Depends(_auth)]) -> dict:
     symbol = str(body.get("symbol", "")).upper()
     if not symbol:
         raise HTTPException(status_code=400, detail="symbol is required")
@@ -143,23 +137,39 @@ async def remove_symbol(
 
 
 @router.post("/guards")
-def set_guards(
-    body: SetGuardReq, _auth: Annotated[None, Depends(_auth)]
-) -> dict:
+def set_guards(body: SetGuardReq, _auth: Annotated[None, Depends(_auth)]) -> dict:
+    """Update safety limits, clamped to .env hard caps.
+
+    The hard caps in ``backend/config.py`` (``OPUS_HARD_*`` env vars)
+    define the maximum permitted values. UI-editable limits may only
+    lower these, never exceed them. Anything above the cap is silently
+    clamped down to the cap so a misconfigured UI cannot widen the
+    safety envelope.
+    """
     g = app_state.guards
     if body.daily_loss_limit_usd is not None:
-        g.daily_loss_limit_usd = body.daily_loss_limit_usd
+        g.daily_loss_limit_usd = min(body.daily_loss_limit_usd, settings.hard_daily_loss_usd)
     if body.loss_12h_limit_usd is not None:
-        g.loss_12h_limit_usd = body.loss_12h_limit_usd
+        g.loss_12h_limit_usd = min(body.loss_12h_limit_usd, settings.hard_12h_loss_usd)
     if body.symbol_loss_limit_usd is not None:
-        g.symbol_loss_limit_usd = body.symbol_loss_limit_usd
+        g.symbol_loss_limit_usd = min(body.symbol_loss_limit_usd, settings.hard_symbol_loss_usd)
     if body.max_position_usd is not None:
-        g.max_position_usd = body.max_position_usd
+        g.max_position_usd = min(body.max_position_usd, settings.hard_max_notional_usd)
     if body.max_live_symbols is not None:
-        g.max_live_symbols = body.max_live_symbols
+        g.max_live_symbols = min(body.max_live_symbols, settings.hard_max_live_symbols)
     if body.max_orders_per_min is not None:
         g.max_orders_per_min = body.max_orders_per_min
-    return {"ok": True}
+    return {
+        "ok": True,
+        "applied": {
+            "daily_loss_limit_usd": g.daily_loss_limit_usd,
+            "loss_12h_limit_usd": g.loss_12h_limit_usd,
+            "symbol_loss_limit_usd": g.symbol_loss_limit_usd,
+            "max_position_usd": g.max_position_usd,
+            "max_live_symbols": g.max_live_symbols,
+            "max_orders_per_min": g.max_orders_per_min,
+        },
+    }
 
 
 @router.get("/settings")
@@ -173,11 +183,15 @@ def runtime_settings(_auth: Annotated[None, Depends(_auth)]) -> dict:
 @router.get("/models")
 def models(_auth: Annotated[None, Depends(_auth)]) -> dict:
     rt = get_runtime()
-    status = rt.model_status() if hasattr(rt, "model_status") else {
-        "enabled": False,
-        "horizons": [],
-        "model_dir": str(settings.model_dir),
-    }
+    status = (
+        rt.model_status()
+        if hasattr(rt, "model_status")
+        else {
+            "enabled": False,
+            "horizons": [],
+            "model_dir": str(settings.model_dir),
+        }
+    )
     available = rt.available_models() if hasattr(rt, "available_models") else []
     return {
         "active_model": status["model_dir"],
@@ -187,9 +201,7 @@ def models(_auth: Annotated[None, Depends(_auth)]) -> dict:
 
 
 @router.post("/models/select")
-async def select_model(
-    body: SelectModelReq, _auth: Annotated[None, Depends(_auth)]
-) -> dict:
+async def select_model(body: SelectModelReq, _auth: Annotated[None, Depends(_auth)]) -> dict:
     try:
         return await get_runtime().set_model_dir(body.model_dir)
     except ValueError as e:
@@ -197,9 +209,7 @@ async def select_model(
 
 
 @router.post("/settings")
-async def set_runtime_settings(
-    body: RuntimeSettingsReq, _auth: Annotated[None, Depends(_auth)]
-) -> dict:
+async def set_runtime_settings(body: RuntimeSettingsReq, _auth: Annotated[None, Depends(_auth)]) -> dict:
     try:
         return await get_runtime().set_runtime_settings(body.model_dump(exclude_none=True))
     except SettingsLimitError as e:
@@ -207,9 +217,7 @@ async def set_runtime_settings(
 
 
 @router.post("/watchlist/mode")
-async def set_symbol_mode(
-    body: SetSymbolModeReq, _auth: Annotated[None, Depends(_auth)]
-) -> dict:
+async def set_symbol_mode(body: SetSymbolModeReq, _auth: Annotated[None, Depends(_auth)]) -> dict:
     try:
         return await get_runtime().set_symbol_execution_mode(body.symbol.upper(), body.execution_mode)
     except ValueError as e:
@@ -217,9 +225,7 @@ async def set_symbol_mode(
 
 
 @router.post("/watchlist/disable")
-async def disable_symbol(
-    body: DisableSymbolReq, _auth: Annotated[None, Depends(_auth)]
-) -> dict:
+async def disable_symbol(body: DisableSymbolReq, _auth: Annotated[None, Depends(_auth)]) -> dict:
     try:
         return await get_runtime().disable_symbol(body.symbol.upper(), body.reason)
     except ValueError as e:
@@ -227,9 +233,7 @@ async def disable_symbol(
 
 
 @router.post("/emergency/stop")
-async def emergency_stop(
-    body: EmergencyStopReq, _auth: Annotated[None, Depends(_auth)]
-) -> dict:
+async def emergency_stop(body: EmergencyStopReq, _auth: Annotated[None, Depends(_auth)]) -> dict:
     return await get_runtime().emergency_stop(body.reason)
 
 
