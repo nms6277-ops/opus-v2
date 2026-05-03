@@ -7,7 +7,9 @@ emergency flatten for managed symbols.
 
 from __future__ import annotations
 
+import asyncio
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -28,6 +30,12 @@ if TYPE_CHECKING:
     from backend.ml.inference import Predictor
 
 log = get_logger(__name__)
+
+# Cap on the size of ``_seen_private_trade_ids``. Binance fill replays
+# only happen within a WS reconnect window, so a few thousand entries
+# is more than enough for dedupe; we evict the oldest above this cap to
+# keep the live trader bounded on the 2 GB target VPS.
+_MAX_SEEN_TRADE_IDS = 10_000
 
 
 def _resolve_horizon_ms(spec: str) -> int:
@@ -81,8 +89,10 @@ class LiveTrader(Trader):
         self._take_profit_bp = float(settings.trade_take_profit_bp)
         # Dedupe key: (symbol, trade_id). Binance occasionally re-emits the
         # same fill event during reconnects; processing it twice would
-        # double-count realized_pnl.
+        # double-count realized_pnl. Bounded with FIFO eviction so 24/7
+        # operation cannot leak memory on the 2 GB VPS.
         self._seen_private_trade_ids: set[tuple[str, str]] = set()
+        self._seen_private_trade_order: deque[tuple[str, str]] = deque()
         # Accumulator for partial fills on a reduce-only close: keyed by
         # (symbol, client_order_id) so we can flush a single
         # ``record_trade_outcome`` when the order finally hits FILLED.
@@ -184,6 +194,10 @@ class LiveTrader(Trader):
             if dedupe_key in self._seen_private_trade_ids:
                 return
             self._seen_private_trade_ids.add(dedupe_key)
+            self._seen_private_trade_order.append(dedupe_key)
+            while len(self._seen_private_trade_order) > _MAX_SEEN_TRADE_IDS:
+                evicted = self._seen_private_trade_order.popleft()
+                self._seen_private_trade_ids.discard(evicted)
 
         if self.live_trade_log is not None:
             try:
@@ -213,13 +227,23 @@ class LiveTrader(Trader):
             if status == "FILLED":
                 close_pnl = self._close_order_pnl.pop(close_key, realized_pnl)
                 if close_pnl:
-                    record_trade_outcome(
+                    event = record_trade_outcome(
                         self.state,
                         symbol=symbol,
                         pnl_usd=close_pnl,
                         net_bp=self._net_bp_from_realized(stats, close_pnl, filled_qty, avg_price),
                         settings=self.runtime_settings,
                     )
+                    if event is not None and self._on_risk_event is not None:
+                        # Risk-event sink is async (Telegram I/O); dispatch
+                        # via the running loop without awaiting because
+                        # ``on_order_update`` itself is sync (called from
+                        # the private-WS receive loop).
+                        try:
+                            loop = asyncio.get_running_loop()
+                            loop.create_task(self._on_risk_event(event))
+                        except RuntimeError:
+                            log.warning("live: risk event %s dropped (no running loop)", event.reason)
                 stats.position_base = 0.0
                 stats.position_entry = 0.0
                 stats.unrealized_pnl = 0.0
@@ -550,31 +574,24 @@ class LiveTrader(Trader):
         # Pop the position from local tracking BEFORE attempting the
         # Binance REST flatten. ``_flatten`` swallows REST errors, so if
         # we left the entry in ``self._positions`` the next snapshot
-        # would re-fire the same exit and double-count PnL on every
-        # subsequent tick. The Binance position itself, if the REST call
-        # failed, will be reconciled on next startup or via
-        # ``emergency_flatten``.
+        # would re-fire the same exit. The Binance position itself, if
+        # the REST call failed, will be reconciled on next startup or
+        # via ``emergency_flatten``.
         self._positions.pop(symbol, None)
 
-        record_pnl(self.state.guards, pnl_usd, symbol=symbol)
-        stats = self.state.symbols.get(symbol)
-        if stats is not None:
-            stats.realized_pnl += pnl_usd
-            stats.fills_count += 1
-        # Per-symbol regime guards (loss-streak pause, profit giveback,
-        # rolling degradation) only fire if record_trade_outcome is
-        # called with the realised PnL. Without it LIVE mode would have
-        # none of these protections.
-        event = record_trade_outcome(
-            self.state,
-            symbol=symbol,
-            pnl_usd=pnl_usd,
-            net_bp=net_bp,
-            settings=self.runtime_settings,
-        )
-        if event is not None and self._on_risk_event is not None:
-            await self._on_risk_event(event)
-
+        # PnL accounting flows EXCLUSIVELY through ``on_order_update``
+        # using Binance's actual ``rp`` (realized_pnl) field. Recording
+        # an estimated ``pnl_usd`` here in addition to the WS-driven
+        # path would double-count: ``_flatten`` places a reduce-only
+        # MARKET whose fill arrives back via ORDER_TRADE_UPDATE, and
+        # ``on_order_update`` already calls ``record_pnl`` and
+        # ``record_trade_outcome`` on the resulting realised PnL. If the
+        # private WS is briefly offline, Binance replays events on
+        # reconnect and our trade-id dedupe lets the missed fills land
+        # exactly once. If the REST flatten itself failed, no fill was
+        # generated and the missing PnL accurately reflects the
+        # never-closed position; ``reconcile_open_positions`` will
+        # disable the symbol on next start.
         await self._flatten(symbol)
 
     @staticmethod

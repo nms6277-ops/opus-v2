@@ -286,19 +286,16 @@ async def test_live_trader_runs_exit_checks_even_after_symbol_disabled():
 
 
 @pytest.mark.asyncio
-async def test_live_trader_records_pnl_and_realized_exactly_once_even_if_flatten_fails():
-    """Even if the Binance REST flatten errors, PnL must record exactly once."""
+async def test_live_trader_close_does_not_locally_record_pnl():
+    """``_maybe_close`` only sends the flatten; PnL accounting is owned by
+    ``on_order_update`` using Binance's actual ``rp`` field. Recording an
+    estimated PnL locally in addition would double-count when the WS fill
+    arrives back from the reduce-only MARKET ``_flatten`` placed.
+    """
 
     state = _state_with_symbol(live=True)
     rest = FakeRest()
-    # Make market_close_position blow up to simulate a Binance / network error.
     rest.positions["UBUSDT"] = 6.0
-
-    async def boom(symbol, position_amt):
-        raise RuntimeError("simulated REST failure")
-
-    rest.market_close_position = boom
-
     trader = LiveTrader(
         state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
     )
@@ -308,24 +305,113 @@ async def test_live_trader_records_pnl_and_realized_exactly_once_even_if_flatten
     assert "UBUSDT" in trader._positions
     pos = trader._positions["UBUSDT"]
 
-    # First close attempt — flatten will raise but be swallowed.
+    # Trigger horizon-timeout exit. ``_maybe_close`` must NOT record PnL —
+    # the flatten REST is sent and the actual realised PnL will arrive
+    # later via the private-WS ORDER_TRADE_UPDATE event.
     snap = _snap()
     snap["ts_ms"] = pos.ts_open_ms + pos.horizon_ms + 1000
     await trader.on_snapshot("UBUSDT", snap)
 
-    pnl_after_first = state.symbols["UBUSDT"].realized_pnl
-    daily_after_first = state.guards.daily_pnl
-    fills_after_first = state.symbols["UBUSDT"].fills_count
-    assert "UBUSDT" not in trader._positions, "position must be popped before flatten"
-
-    # Subsequent snapshots must NOT re-record PnL since the position is gone.
+    assert "UBUSDT" not in trader._positions, "position must be popped after exit decision"
+    assert rest.flattened, "flatten REST must have been called"
+    # Crucially: no local PnL accounting happened in _maybe_close.
+    assert state.symbols["UBUSDT"].realized_pnl == 0.0
+    assert state.guards.daily_pnl == 0.0
+    assert state.symbols["UBUSDT"].fills_count == 0
+    # Subsequent snapshots must not re-fire any accounting either.
     snap2 = dict(snap)
     snap2["ts_ms"] += 1000
     await trader.on_snapshot("UBUSDT", snap2)
+    assert state.symbols["UBUSDT"].realized_pnl == 0.0
+    assert state.guards.daily_pnl == 0.0
 
-    assert state.symbols["UBUSDT"].realized_pnl == pnl_after_first
-    assert state.guards.daily_pnl == daily_after_first
-    assert state.symbols["UBUSDT"].fills_count == fills_after_first
+
+@pytest.mark.asyncio
+async def test_live_trader_close_records_pnl_when_ws_fill_arrives():
+    """Full close cycle: _maybe_close → flatten REST → ORDER_TRADE_UPDATE
+    arrives via on_order_update → PnL recorded EXACTLY ONCE from Binance's
+    ``rp`` field (no double-counting with _maybe_close estimate).
+    """
+
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+    rest.positions["UBUSDT"] = 6.0
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    await trader.start()
+    await trader.on_snapshot("UBUSDT", _snap())
+    pos = trader._positions["UBUSDT"]
+
+    # Horizon timeout fires the flatten.
+    snap = _snap()
+    snap["ts_ms"] = pos.ts_open_ms + pos.horizon_ms + 1000
+    await trader.on_snapshot("UBUSDT", snap)
+
+    # Simulate the Binance ORDER_TRADE_UPDATE that arrives AFTER the
+    # reduce-only MARKET _flatten placed.
+    fill = {
+        "e": "ORDER_TRADE_UPDATE",
+        "o": {
+            "s": "UBUSDT",
+            "S": "SELL",
+            "X": "FILLED",
+            "c": "OPUS_FLATTEN_UBUSDT_99",
+            "i": 5555,
+            "t": 7777,
+            "z": "5.994005994",
+            "ap": "1.0005",
+            "rp": "-0.030",
+            "R": True,
+        },
+    }
+    trader.on_order_update(fill)
+    # Re-deliver same trade-id (Binance reconnect replay) — must dedupe.
+    trader.on_order_update(fill)
+
+    assert state.symbols["UBUSDT"].realized_pnl == pytest.approx(-0.030)
+    assert state.guards.daily_pnl == pytest.approx(-0.030)
+    assert state.symbols["UBUSDT"].fills_count == 1
+
+
+@pytest.mark.asyncio
+async def test_seen_private_trade_ids_evicts_oldest_above_cap(monkeypatch):
+    """``_seen_private_trade_ids`` must stay bounded under 24/7 operation."""
+    from backend.traders import live as live_mod
+
+    monkeypatch.setattr(live_mod, "_MAX_SEEN_TRADE_IDS", 5)
+
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+
+    for tid in range(20):
+        trader.on_order_update(
+            {
+                "e": "ORDER_TRADE_UPDATE",
+                "o": {
+                    "s": "UBUSDT",
+                    "S": "BUY",
+                    "X": "FILLED",
+                    "c": f"OPUS_test_{tid}",
+                    "i": tid,
+                    "t": tid,
+                    "z": "1.0",
+                    "ap": "1.0",
+                    "rp": "0.0",
+                    "R": False,
+                },
+            }
+        )
+
+    # Set must be capped to the configured max.
+    assert len(trader._seen_private_trade_ids) <= 5
+    assert len(trader._seen_private_trade_order) <= 5
+    # Oldest IDs evicted; newest retained.
+    assert ("UBUSDT", "0") not in trader._seen_private_trade_ids
+    assert ("UBUSDT", "19") in trader._seen_private_trade_ids
 
 
 @pytest.mark.asyncio
