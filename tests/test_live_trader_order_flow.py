@@ -40,6 +40,19 @@ class FakeRest:
         self.leverage_calls.append((symbol, leverage))
         return {"symbol": symbol, "leverage": leverage}
 
+    async def cached_symbol_filters(self, symbol):
+        # Use loose filters so tests focus on the logic, not exchange limits.
+        from backend.exchanges.binance_filters import SymbolFilters
+
+        return SymbolFilters(
+            tick_size=1e-9,
+            step_size=1e-9,
+            min_qty=0.0,
+            min_notional=0.0,
+            price_precision=9,
+            quantity_precision=9,
+        )
+
     async def place_order(self, **kwargs):
         self.orders.append(kwargs)
         return {"orderId": len(self.orders), "clientOrderId": kwargs.get("client_order_id")}
@@ -106,7 +119,9 @@ async def test_live_trader_rejects_when_private_ws_stale():
 async def test_live_trader_ignores_paper_symbol():
     state = _state_with_symbol(live=False)
     rest = FakeRest()
-    trader = LiveTrader(state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings())
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
     await trader.start()
 
     await trader.on_snapshot("UBUSDT", _snap())
@@ -118,7 +133,9 @@ async def test_live_trader_ignores_paper_symbol():
 async def test_live_trader_sets_leverage_and_places_opus_market_order():
     state = _state_with_symbol(live=True)
     rest = FakeRest()
-    trader = LiveTrader(state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings())
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
     await trader.start()
 
     await trader.on_snapshot("UBUSDT", _snap())
@@ -158,7 +175,9 @@ async def test_live_trader_stop_cancels_and_flattens_managed_symbols():
     state = _state_with_symbol(live=True)
     rest = FakeRest()
     rest.positions["UBUSDT"] = 3.0
-    trader = LiveTrader(state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings())
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
     await trader.start()
 
     await trader.stop()

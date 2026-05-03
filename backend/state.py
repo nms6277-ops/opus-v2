@@ -173,7 +173,7 @@ class AppState:
                 "loss_12h_limit_usd": self.guards.loss_12h_limit_usd,
                 "symbol_loss_limit_usd": self.guards.symbol_loss_limit_usd,
                 "daily_pnl": self.guards.daily_pnl,
-                "pnl_12h": sum(e[2] for e in self.guards.pnl_events),
+                "pnl_12h": sum(e[2] for e in self.guards.pnl_events if e[0] >= time.time() - 12 * 3600.0),
                 "risk_trade_count": self.guards.risk_trade_count,
                 "pnl_peak_usd": self.guards.pnl_peak_usd,
                 "pnl_drawdown_pct": self.guards.pnl_drawdown_pct,

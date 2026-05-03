@@ -11,6 +11,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from backend.config import settings
+from backend.exchanges.binance_filters import round_qty_down, validate_notional
 from backend.exchanges.binance_rest import BinanceRest, get_client
 from backend.log import get_logger
 from backend.safety.guards import OrderIntent, check, record_order_sent
@@ -116,7 +117,24 @@ class LiveTrader(Trader):
             return
 
         notional = float(stats.current_notional_usd or self.runtime_settings.probation_notional_usd)
-        qty = notional / entry_price
+        raw_qty = notional / entry_price
+        try:
+            filters = await self.rest.cached_symbol_filters(symbol)
+        except Exception as e:
+            self._reject_symbol(symbol, f"symbol filters unavailable: {e}")
+            return
+        qty = round_qty_down(raw_qty, filters)
+        if qty <= 0:
+            self._reject_symbol(
+                symbol,
+                f"qty {raw_qty:.10f} rounds to 0 at step={filters.step_size}",
+            )
+            return
+        try:
+            validate_notional(price=entry_price, qty=qty, filters=filters)
+        except ValueError as e:
+            self._reject_symbol(symbol, f"notional check: {e}")
+            return
         intent = OrderIntent(
             symbol=symbol,
             side=side,
@@ -202,13 +220,15 @@ class LiveTrader(Trader):
             and stats.live_state in {"probation_live", "active_live", "cooldown", "disabled"}
         ]
 
+    # The Binance USER-DATA stream is event-driven (ORDER_TRADE_UPDATE /
+    # ACCOUNT_UPDATE), not a continuous heartbeat like the public depth
+    # feed. Between events the gap can be minutes, so reusing the public-WS
+    # ``ws_stale_ms`` (default 1500ms) here would block every single live
+    # entry. We therefore check connection state only and rely on the
+    # websockets library's ping/pong + listenKey keepalive in
+    # BinancePrivateWS to detect dead sockets.
     def _private_ws_ready(self) -> bool:
-        if not self.state.binance_private_connected:
-            return False
-        if self.state.binance_private_last_msg_ts <= 0:
-            return False
-        age_ms = (time.time() - self.state.binance_private_last_msg_ts) * 1000.0
-        return age_ms <= self.state.guards.ws_stale_ms
+        return bool(self.state.binance_private_connected)
 
     def _reject_symbol(self, symbol: str, reason: str) -> None:
         stats = self.state.symbols.get(symbol)

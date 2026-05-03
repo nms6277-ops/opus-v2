@@ -706,8 +706,8 @@ class Runtime:
             len(snap.get("bids", [])),
             len(snap.get("asks", [])),
         )
+        was_ready = ctx.ob.ready
         ctx.ob.apply_snapshot(snap)
-        was_ready = False
         ctx.ob.flush_buffer()
         if ctx.ob.ready and not was_ready:
             log.info(
