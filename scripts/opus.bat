@@ -39,6 +39,10 @@ if /I "%CMD%"=="status"   goto :status
 if /I "%CMD%"=="logs"     goto :logs
 if /I "%CMD%"=="train"    goto :train
 if /I "%CMD%"=="backtest" goto :backtest
+if /I "%CMD%"=="collect-active"  goto :collect_active
+if /I "%CMD%"=="train-active"    goto :train_active
+if /I "%CMD%"=="backtest-active" goto :backtest_active
+if /I "%CMD%"=="deploy-active"   goto :deploy_active
 if /I "%CMD%"=="config"   goto :config
 if /I "%CMD%"=="open-ui"  goto :openui
 if /I "%CMD%"=="trades"   goto :trades
@@ -79,6 +83,16 @@ echo                                 opus backtest
 echo                                 opus backtest --horizons 2s 15s
 echo                                 opus backtest --symbols AIOTUSDT
 echo.
+echo   In-play short-cycle workflow (collect -^> train -^> backtest -^> deploy):
+echo     opus collect-active --symbols AIOTUSDT --duration 4h
+echo                               collect snapshots for the chosen window then exit
+echo     opus train-active --symbols AIOTUSDT --window 4h
+echo                               per-symbol model on the last 4h of data
+echo     opus backtest-active --symbols AIOTUSDT --window 1h
+echo                               honest taker round-trip P^&L on the last 1h
+echo     opus deploy-active --symbols AIOTUSDT --target user@vps:dir
+echo                               print rsync command for manual VPS deploy
+echo.
 echo     opus config               print current settings (mode, horizon, symbols, ...)
 echo     opus help                 show this message
 echo.
@@ -112,6 +126,38 @@ pushd "%OPUS_HOME%"
 set "RC=%ERRORLEVEL%"
 popd
 if exist "%PIDFILE%" del "%PIDFILE%" >nul 2>&1
+exit /b %RC%
+
+rem ============================================================
+:collect_active
+pushd "%OPUS_HOME%"
+"%PY%" -m backend.cli.active collect !REST!
+set "RC=%ERRORLEVEL%"
+popd
+exit /b %RC%
+
+rem ============================================================
+:train_active
+pushd "%OPUS_HOME%"
+"%PY%" -m backend.cli.active train !REST!
+set "RC=%ERRORLEVEL%"
+popd
+exit /b %RC%
+
+rem ============================================================
+:backtest_active
+pushd "%OPUS_HOME%"
+"%PY%" -m backend.cli.active backtest !REST!
+set "RC=%ERRORLEVEL%"
+popd
+exit /b %RC%
+
+rem ============================================================
+:deploy_active
+pushd "%OPUS_HOME%"
+"%PY%" -m backend.cli.active deploy !REST!
+set "RC=%ERRORLEVEL%"
+popd
 exit /b %RC%
 
 rem ============================================================

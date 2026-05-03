@@ -68,9 +68,7 @@ def synthetic_book():
     }
     ob.last_update_id = 1
     ob.ready = True
-    ob.add_trade(
-        Trade(ts_ms=int(time.time() * 1000), price=mid, qty=1.0, is_buyer_maker=False)
-    )
+    ob.add_trade(Trade(ts_ms=int(time.time() * 1000), price=mid, qty=1.0, is_buyer_maker=False))
     return ob
 
 

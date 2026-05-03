@@ -261,6 +261,7 @@ def run_backtest(
     target_trade_frac: float = 0.05,
     out_dir: Path | None = None,
     symbols: list[str] | None = None,
+    window: str | None = None,
 ) -> dict:
     """End-to-end backtest. Returns the summary dict (also written to disk)."""
     try:
@@ -271,8 +272,8 @@ def run_backtest(
     out_dir = Path(out_dir) if out_dir is not None else Path(models_dir) / "backtest"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    log.info("backtest: load %s", data_dir)
-    df = load_dataset(data_dir, symbols=symbols)
+    log.info("backtest: load %s window=%s", data_dir, window)
+    df = load_dataset(data_dir, symbols=symbols, window=window)
 
     # Decide which horizons to backtest. If the user didn't specify any,
     # discover them by listing trained-model folders ``h{name}`` so custom
@@ -291,6 +292,7 @@ def run_backtest(
     # rather than ``models\agnostic\global``, so we look in both locations
     # transparently. The "global subfolder" wins if both contain models.
     from backend.ml.labels import parse_horizon_spec
+
     defaults_by_name = {h.name.lower(): h for h in DEFAULT_HORIZONS}
 
     def _resolve(name: str) -> HorizonSpec:
@@ -300,18 +302,21 @@ def run_backtest(
     models_root = Path(models_dir)
     global_root = models_root / "global"
     # Pick the directory that actually contains h*-folders with a model.
-    if any((global_root / d).is_dir() and (global_root / d / "model.lgb").exists()
-           for d in (p.name for p in global_root.glob("h*") if p.is_dir())):
+    if any(
+        (global_root / d).is_dir() and (global_root / d / "model.lgb").exists()
+        for d in (p.name for p in global_root.glob("h*") if p.is_dir())
+    ):
         models_root = global_root
-        log.info("backtest: resolved --models-dir to %s (auto-detected "
-                 "global/ subfolder created by train)", models_root)
+        log.info(
+            "backtest: resolved --models-dir to %s (auto-detected global/ subfolder created by train)",
+            models_root,
+        )
 
     if horizons:
         use_horizons = [_resolve(h) for h in horizons]
     else:
         discovered = [
-            p.name[1:] for p in sorted(models_root.glob("h*"))
-            if p.is_dir() and (p / "model.lgb").exists()
+            p.name[1:] for p in sorted(models_root.glob("h*")) if p.is_dir() and (p / "model.lgb").exists()
         ]
         use_horizons = [_resolve(n) for n in discovered] if discovered else list(DEFAULT_HORIZONS)
     log.info("backtest: horizons = %s", [h.name for h in use_horizons])
@@ -330,7 +335,8 @@ def run_backtest(
         if not model_path.exists() or not meta_path.exists():
             log.warning(
                 "backtest: missing model for h%s at %s, skipping",
-                h.name, model_path,
+                h.name,
+                model_path,
             )
             continue
         booster = lgb.Booster(model_file=str(model_path))
@@ -343,7 +349,11 @@ def run_backtest(
         summary["horizons"][h.name] = {
             "n_trades": result.get("n_trades", 0),
             "scenarios": {
-                label: {k: v for k, v in s.items() if k in ("avg_net_bp", "hit_rate", "sharpe", "fill_rate", "n_filled")}
+                label: {
+                    k: v
+                    for k, v in s.items()
+                    if k in ("avg_net_bp", "hit_rate", "sharpe", "fill_rate", "n_filled")
+                }
                 for label, s in result.get("scenarios", {}).items()
             },
         }
@@ -378,6 +388,16 @@ def main() -> int:
     parser.add_argument("--symbols", nargs="*", default=None)
     parser.add_argument("--horizons", nargs="*", default=None)
     parser.add_argument("--target-trade-frac", type=float, default=0.05)
+    parser.add_argument(
+        "--window",
+        type=str,
+        default=None,
+        help=(
+            "in-play short-cycle filter: only score the last N of data, "
+            "e.g. --window 1h. Cutoff uses the parquet's most recent ts_ms, "
+            "so the call is deterministic across re-runs."
+        ),
+    )
     parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
@@ -389,9 +409,11 @@ def main() -> int:
 
     if args.data_dir is None:
         from backend.config import settings
+
         args.data_dir = settings.data_dir
 
     summary = run_backtest(
+        window=args.window,
         data_dir=args.data_dir,
         models_dir=args.models_dir,
         horizons=args.horizons,

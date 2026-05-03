@@ -382,7 +382,22 @@ def main() -> int:
         "--models-dir", type=Path, default=Path("./models"), help="output dir for trained artefacts"
     )
     parser.add_argument(
-        "--symbols", nargs="*", default=None, help="restrict to these symbols (default: all found)"
+        "--symbols",
+        nargs="*",
+        default=None,
+        help=(
+            "restrict to these symbols (default: all found, minus the "
+            "settings.train_symbol_blocklist - typically BTC/ETH whose "
+            "sub-bp spreads make spread-aware edge undetectable)"
+        ),
+    )
+    parser.add_argument(
+        "--include-blocklisted",
+        action="store_true",
+        help=(
+            "override settings.train_symbol_blocklist; only meaningful when "
+            "--symbols is omitted, otherwise the explicit list always wins"
+        ),
     )
     parser.add_argument(
         "--horizons",
@@ -410,7 +425,35 @@ def main() -> int:
         ),
     )
     parser.add_argument(
-        "--per-symbol", action="store_true", help="train one model per symbol instead of one global"
+        "--window",
+        type=str,
+        default=None,
+        help=(
+            "in-play short-cycle filter: only train on the last N of data, "
+            "e.g. --window 4h. Cutoff uses the parquet's most recent ts_ms "
+            "per symbol, so the call is deterministic across re-runs."
+        ),
+    )
+    parser.add_argument(
+        "--mode",
+        choices=("per-symbol", "global"),
+        default="per-symbol",
+        help=(
+            "per-symbol (default) trains one model per coin under "
+            "models/per_symbol/{SYM}/h{H}; global pools every symbol into "
+            "one model under models/global/h{H} (use for ablation only)"
+        ),
+    )
+    parser.add_argument(
+        "--per-symbol",
+        action="store_true",
+        help="alias for --mode=per-symbol (kept for back-compat)",
+    )
+    parser.add_argument(
+        "--global",
+        dest="global_mode",
+        action="store_true",
+        help="alias for --mode=global",
     )
     parser.add_argument(
         "--no-symbol-feature",
@@ -437,6 +480,33 @@ def main() -> int:
         format="%(asctime)s %(levelname)-7s %(name)-22s %(message)s",
     )
 
+    # Resolve mode: --global / --per-symbol > --mode (default per-symbol).
+    if args.global_mode and args.per_symbol:
+        parser.error("--global and --per-symbol are mutually exclusive")
+    if args.global_mode:
+        args.mode = "global"
+    elif args.per_symbol:
+        args.mode = "per-symbol"
+    log.info("train: mode=%s", args.mode)
+
+    # Apply default blocklist when the user didn't pass --symbols. We never
+    # silently drop something the user explicitly asked for.
+    from backend.config import settings as _settings
+
+    if args.symbols is None and not args.include_blocklisted:
+        blocked = tuple(s.upper() for s in _settings.train_symbol_blocklist)
+        if blocked:
+            log.info(
+                "train: applying default blocklist %s (override with "
+                "--include-blocklisted or pass --symbols explicitly)",
+                blocked,
+            )
+            args._blocked = blocked
+        else:
+            args._blocked = ()
+    else:
+        args._blocked = ()
+
     if args.data_dir is None:
         from backend.config import settings
 
@@ -450,7 +520,17 @@ def main() -> int:
         from_date=args.from_date,
         to_date=args.to_date,
         max_rows_per_symbol=args.max_rows_per_symbol,
+        window=args.window,
     )
+    if args._blocked:
+        before = df.height
+        df = df.filter(~pl.col("symbol").is_in(list(args._blocked)))
+        log.info(
+            "train: blocklist removed %d rows (kept %d); symbols left: %s",
+            before - df.height,
+            df.height,
+            sorted(df["symbol"].unique().to_list()),
+        )
 
     # 2. Decide horizons to train.
     if args.horizons:
@@ -488,7 +568,7 @@ def main() -> int:
         )
 
     results: list[dict] = []
-    if args.per_symbol:
+    if args.mode == "per-symbol":
         for sym in sorted(df["symbol"].unique().to_list()):
             sym_df = df.filter(pl.col("symbol") == sym)
             sym_df, ordered_syms = _add_symbol_id(sym_df)

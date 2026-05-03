@@ -100,9 +100,7 @@ def parse_horizon_spec(spec: str) -> HorizonSpec:
     elif s.endswith("m"):
         ms = int(float(s[:-1]) * 60_000)
     else:
-        raise ValueError(
-            f"horizon '{spec}' must end in ms / s / m (e.g. 500ms, 2s, 1m)"
-        )
+        raise ValueError(f"horizon '{spec}' must end in ms / s / m (e.g. 500ms, 2s, 1m)")
     if ms <= 0:
         raise ValueError(f"horizon '{spec}' must be positive")
     tol = max(min(ms // 2, 5_000), 250)
@@ -141,15 +139,11 @@ def _classify_taker(
     out[short_ok & ~long_ok] = LBL_DOWN
     both = long_ok & short_ok
     if both.any():
-        out[both] = np.where(
-            gross_long_bp[both] >= gross_short_bp[both], LBL_UP, LBL_DOWN
-        ).astype(np.int8)
+        out[both] = np.where(gross_long_bp[both] >= gross_short_bp[both], LBL_UP, LBL_DOWN).astype(np.int8)
     return out
 
 
-def _label_one_symbol(
-    sym_df: pl.DataFrame, horizons: tuple[HorizonSpec, ...]
-) -> pl.DataFrame:
+def _label_one_symbol(sym_df: pl.DataFrame, horizons: tuple[HorizonSpec, ...]) -> pl.DataFrame:
     """Compute per-row return diagnostics for a single sorted (by ts_ms) symbol frame.
 
     Always emits ``ret_{H}_bp`` (mid-to-mid, kept for compat) plus the v2
@@ -194,16 +188,10 @@ def _label_one_symbol(
         gross_short_bp = np.where(valid, (bb - ba_fut) * inv_mid, 0.0)
 
         new_cols.append(pl.Series(f"ret_{h.name}_bp", ret_bp, dtype=pl.Float32))
-        new_cols.append(
-            pl.Series(f"gross_long_{h.name}_bp", gross_long_bp, dtype=pl.Float32)
-        )
-        new_cols.append(
-            pl.Series(f"gross_short_{h.name}_bp", gross_short_bp, dtype=pl.Float32)
-        )
+        new_cols.append(pl.Series(f"gross_long_{h.name}_bp", gross_long_bp, dtype=pl.Float32))
+        new_cols.append(pl.Series(f"gross_short_{h.name}_bp", gross_short_bp, dtype=pl.Float32))
         new_cols.append(pl.Series(f"y_{h.name}_valid", valid, dtype=pl.Boolean))
-        new_cols.append(
-            pl.Series(f"y_{h.name}", np.zeros_like(ret_bp, dtype=np.int8), dtype=pl.Int8)
-        )
+        new_cols.append(pl.Series(f"y_{h.name}", np.zeros_like(ret_bp, dtype=np.int8), dtype=pl.Int8))
 
     return sym_df.with_columns(new_cols)
 
@@ -308,9 +296,7 @@ def add_labels(
                 if train_returns.is_empty():
                     threshold = float(min_threshold_bp)
                 else:
-                    threshold = float(
-                        max(min_threshold_bp, train_returns.abs().median())
-                    )
+                    threshold = float(max(min_threshold_bp, train_returns.abs().median()))
                 ret_arr = sym_df[ret_col].to_numpy()
                 y = _classify_mid(ret_arr, threshold)
 

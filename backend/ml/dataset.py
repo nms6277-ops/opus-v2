@@ -141,6 +141,29 @@ def discover(
     return [SymbolFiles(sym, fs) for sym, fs in sorted(out.items())]
 
 
+def _parse_window_ms(spec: str | None) -> int | None:
+    """Parse a duration string like ``"4h"`` / ``"30m"`` / ``"15s"`` to ms.
+
+    Returns ``None`` for ``None``/empty input. Used by the in-play ``--window``
+    CLI flag so the caller can say "only the last 4 hours of data" without
+    having to hand-compute timestamps.
+    """
+    if spec is None:
+        return None
+    s = spec.strip().lower()
+    if not s:
+        return None
+    if s.endswith("ms"):
+        return int(s[:-2])
+    if s.endswith("h"):
+        return int(float(s[:-1]) * 3600_000)
+    if s.endswith("m"):
+        return int(float(s[:-1]) * 60_000)
+    if s.endswith("s"):
+        return int(float(s[:-1]) * 1_000)
+    raise ValueError(f"window '{spec}' must end in ms / s / m / h (e.g. 500ms, 30s, 1m, 4h)")
+
+
 def load_dataset(
     data_dir: Path,
     *,
@@ -150,6 +173,8 @@ def load_dataset(
     from_date: str | None = None,
     to_date: str | None = None,
     max_rows_per_symbol: int | None = None,
+    window: str | None = None,
+    train_val_test_pct: tuple[float, float, float] | None = None,
 ) -> pl.DataFrame:
     """Load all snapshots for ``symbols`` and add a ``part`` column.
 
@@ -159,11 +184,14 @@ def load_dataset(
     val_frac``) to ``"test"``. This guarantees we never train on data
     that comes after the validation/test windows.
     """
+    if train_val_test_pct is not None:
+        train_frac, val_frac, _test_frac = train_val_test_pct
     if train_frac <= 0 or val_frac <= 0 or train_frac + val_frac >= 1.0:
         raise ValueError(
             f"invalid splits: train_frac={train_frac}, val_frac={val_frac}; must be positive and sum to <1"
         )
 
+    window_ms = _parse_window_ms(window)
     inventory = discover(data_dir, symbols=symbols, from_date=from_date, to_date=to_date)
     if not inventory:
         raise RuntimeError(f"no parquet files found under {data_dir}/snapshots")
@@ -181,6 +209,24 @@ def load_dataset(
             [pl.read_parquet(f.path, memory_map=False) for f in sf.files],
             how="diagonal_relaxed",
         ).sort("ts_ms")
+
+        if window_ms is not None and sym_df.height > 0:
+            # In-play short-cycle workflow: only keep the last ``window``
+            # of data, where the cutoff is the most recent ts_ms in this
+            # symbol's parquet (NOT wall-clock now, so the call is
+            # deterministic across reruns of the same data).
+            latest_ms = int(sym_df["ts_ms"].max())
+            cutoff_ms = latest_ms - window_ms
+            before = sym_df.height
+            sym_df = sym_df.filter(pl.col("ts_ms") >= cutoff_ms)
+            log.info(
+                "dataset: %s windowed last %s -> %d rows (was %d, cutoff_ms=%d)",
+                sf.symbol,
+                window,
+                sym_df.height,
+                before,
+                cutoff_ms,
+            )
 
         if (
             max_rows_per_symbol is not None

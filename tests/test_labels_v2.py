@@ -106,9 +106,7 @@ def test_taker_mode_keeps_large_moves_as_up():
     h2 = HorizonSpec("2s", 2_000, 500)
     assert thresh[("AIOTUSDT", h2.name)] < 16.0
     # Rows in (50 - 20, 50) — mid jumps within the 2s horizon — should be UP.
-    pre_jump_up = df_lab.filter((pl.col("ts_ms") >= 3000) & (pl.col("ts_ms") < 5000))[
-        "y_2s"
-    ].to_numpy()
+    pre_jump_up = df_lab.filter((pl.col("ts_ms") >= 3000) & (pl.col("ts_ms") < 5000))["y_2s"].to_numpy()
     assert (pre_jump_up == LBL_UP).any()
 
 

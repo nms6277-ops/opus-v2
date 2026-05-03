@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     snapshot_depth: int = 40
 
     # Raw logs (tick-level). Both optional; disk budget is the trade-off.
-    collect_raw_depth: bool = False    # every depthUpdate, ~1-3 MB/symbol/hr after zstd
+    collect_raw_depth: bool = False  # every depthUpdate, ~1-3 MB/symbol/hr after zstd
     # collect_raw_trades is auto-enabled when feed_sdk_from_trade_log is true,
     # because the offline replay needs the full trade stream to reproduce the
     # SDK state. ~0.5-5 MB/symbol/hr after zstd.
