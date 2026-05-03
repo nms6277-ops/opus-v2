@@ -1,31 +1,43 @@
 """Vectorised backtest: maker vs taker scenarios on the held-out test slice.
 
 The training pipeline emits a labelled DataFrame with one row per snapshot
-and a ``ret_{H}_bp`` column for each trained horizon. This module loads
-the trained LightGBM bundle, replays it on the ``part == "test"`` slice,
-turns the predicted ``confidence = P(UP) − P(DOWN)`` into one of three
-trade decisions per row (long, short, no-trade) using a top-N
-threshold, and computes realised PnL under several fee assumptions:
+and the spread-aware label columns ``ret_{H}_bp`` (mid-to-mid, kept for
+diagnostics), ``gross_long_{H}_bp`` / ``gross_short_{H}_bp`` (taker round-trip
+P&L *including* the spread cost), plus the static ``best_bid``/``best_ask``
+columns. This module loads the trained LightGBM bundle, replays it on the
+``part == "test"`` slice, turns the predicted ``confidence = P(UP) − P(DOWN)``
+into one of three trade decisions per row (long, short, no-trade) using a
+top-N threshold, and computes realised PnL under several fee/fill
+assumptions:
 
-- **Taker only**: pay ``2 × taker_fee_bp`` round-trip. This is what the
-  paper trader currently does in :mod:`backend.traders.paper`.
-- **Maker only (always filled)**: pay ``2 × maker_fee_bp`` (could be
-  negative for VIPs / rebates) and skip the spread. Best-case ceiling.
-- **Maker only (crossing-only fill)**: only count rows where the next
-  snapshot crossed our limit — i.e. the bid moved down into our long
-  limit, or the ask moved up into our short limit. More realistic
-  approximation than always-filled because it discards rows where we
-  would have queued forever.
+- **Taker (honest)**: enter at the offer, exit at the bid (or symmetric
+  for shorts). Gross P&L is read directly from ``gross_{long|short}_{H}_bp``,
+  so the bid-ask spread is **already deducted**. We then subtract
+  ``2 × taker_fee_bp`` for round-trip commission. This is the only
+  scenario that matches what :mod:`backend.traders.paper` actually executes.
+- **Maker (always filled)**: assume the limit posts on top of the queue and
+  always gets hit. P&L is mid-to-mid (spread captured by the maker), minus
+  ``2 × maker_fee_bp`` (could be negative for VIPs / rebates). Best-case
+  ceiling — unrealistic on micro-cap altcoins.
+- **Maker (crossing-only fill)**: same fee, but only count rows where the
+  next snapshot crossed our limit (bid moved down into our long limit, or
+  ask moved up into our short limit). Coarse but more honest than always-
+  filled.
 
-The result is a JSON report saved to
-``models_dir/backtest/h{horizon}.json`` and an aggregated summary
-``models_dir/backtest/summary.json``. The summary is also printed in a
-human-readable table at the end of ``main``.
+The v1 mid-to-mid backtest path (and the v1 ``cost_mode="mid"`` labels) is
+still reachable via ``--cost-mode mid``; this is **only** kept for back-compat
+with models trained on v1 parquets and should not be used for any new work.
+The gap between the v1 and v2 numbers on the same model is a direct measure
+of how much spread cost the v1 reports were hiding.
+
+The result is a JSON report saved to ``models_dir/backtest/h{horizon}.json``
+and an aggregated summary ``models_dir/backtest/summary.json``. The summary
+is also printed in a human-readable table at the end of ``main``.
 
 Run as::
 
     python -m backend.ml.backtest --data-dir D:/opus-data --models-dir models/global \
-        --horizons 1s 5s 30s --target-trade-frac 0.05
+        --horizons 2s 5s 15s --target-trade-frac 0.05
 
 This module is **read-only on disk**: it never mutates parquets, models,
 or the live runtime.
@@ -50,12 +62,15 @@ from backend.ml.train import _add_symbol_id
 log = logging.getLogger("backend.ml.backtest")
 
 
+# (label, fee per side bp, fill model, cost model)
+#   fill model: "always" | "cross"
+#   cost  model: "taker"  -> use spread-deducted gross_{long,short}_{H}_bp
+#                "maker"  -> use mid-to-mid ret_{H}_bp (spread captured)
 SCENARIOS = (
-    # (label, fee per side bp, label_for_fill_model)
-    ("taker", 4.0, "always"),       # market-take both ways
-    ("maker_best", 2.0, "always"),   # default Binance maker, always filled
-    ("maker_zero", 0.0, "always"),   # VIP3+/rebated maker, always filled
-    ("maker_cross", 2.0, "cross"),   # default maker, only crossing fills
+    ("taker", 4.0, "always", "taker"),  # honest taker round-trip
+    ("maker_best", 2.0, "always", "maker"),  # default Binance maker
+    ("maker_zero", 0.0, "always", "maker"),  # VIP3+/rebated maker
+    ("maker_cross", 2.0, "cross", "maker"),  # only count crossing fills
 )
 
 
@@ -141,6 +156,8 @@ def _backtest_horizon(
 ) -> dict:
     valid_col = f"y_{horizon.name}_valid"
     ret_col = f"ret_{horizon.name}_bp"
+    long_col = f"gross_long_{horizon.name}_bp"
+    short_col = f"gross_short_{horizon.name}_bp"
     test = df_test.filter(pl.col(valid_col))
     if test.height == 0:
         return {"horizon": horizon.name, "error": "no valid test rows"}
@@ -151,6 +168,22 @@ def _backtest_horizon(
     conf = proba[:, 2] - proba[:, 0]
     ret_bp = test[ret_col].to_numpy().astype(np.float64)
 
+    # Taker round-trip P&L — spread is already baked in.
+    if long_col in test.columns and short_col in test.columns:
+        gross_long_bp = test[long_col].to_numpy().astype(np.float64)
+        gross_short_bp = test[short_col].to_numpy().astype(np.float64)
+    else:
+        # Backwards-compat: legacy parquets without the v2 gross columns.
+        # Fall back to mid-to-mid * side, which UNDERESTIMATES costs by the
+        # full spread — emit a clear warning so the user knows.
+        log.warning(
+            "backtest %s: missing gross_long/short columns; falling back to "
+            "mid-to-mid (this MISSES the bid-ask spread cost)",
+            horizon.name,
+        )
+        gross_long_bp = ret_bp
+        gross_short_bp = -ret_bp
+
     bb = test["best_bid"].to_numpy().astype(np.float64)
     ba = test["best_ask"].to_numpy().astype(np.float64)
 
@@ -158,8 +191,10 @@ def _backtest_horizon(
     side = np.where(conf >= thr, 1, np.where(conf <= -thr, -1, 0)).astype(np.int8)
     is_trade = side != 0
 
-    # gross PnL per row (before fees), in basis points. side * realised return.
-    gross = side.astype(np.float64) * ret_bp
+    # Per-row gross P&L in two flavours.
+    side_f = side.astype(np.float64)
+    gross_taker = np.where(side == 1, gross_long_bp, np.where(side == -1, gross_short_bp, 0.0))
+    gross_maker = side_f * ret_bp
 
     # Cross-fill mask depends on whether the next tick crossed our limit price.
     # The dataset is sorted (symbol, ts_ms), so the row immediately after the
@@ -173,40 +208,39 @@ def _backtest_horizon(
         m = syms_arr == s
         cross_mask_full[m] = _maker_cross_fill_mask(side[m], bb[m], ba[m])
 
+    def _gross_for(cost_model: str) -> np.ndarray:
+        return gross_taker if cost_model == "taker" else gross_maker
+
     by_scenario: dict[str, dict] = {}
-    for label, fee_per_side_bp, fill_model in SCENARIOS:
+    for label, fee_per_side_bp, fill_model, cost_model in SCENARIOS:
         rt_fee_bp = 2.0 * fee_per_side_bp
-        net = gross - rt_fee_bp
-        if fill_model == "always":
-            fill = is_trade
-        elif fill_model == "cross":
+        net = _gross_for(cost_model) - rt_fee_bp
+        if fill_model == "cross":
             fill = is_trade & cross_mask_full
         else:
             fill = is_trade
         by_scenario[label] = {
             "fee_per_side_bp": fee_per_side_bp,
             "fill_model": fill_model,
+            "cost_model": cost_model,
             **_agg_metrics(net, ret_bp, fill, side),
         }
 
-    # Per-symbol breakdown for the taker scenario (most operationally relevant).
+    # Per-symbol breakdown across all scenarios. Same gross/fill rules as above.
     per_symbol: dict[str, dict] = {}
     for s in np.unique(syms_arr):
         m = syms_arr == s
-        per_symbol[str(s)] = {
-            label: _agg_metrics(
-                gross[m] - 2.0 * data["fee_per_side_bp"],
+        per_symbol[str(s)] = {}
+        for label, fee_per_side_bp, fill_model, cost_model in SCENARIOS:
+            rt_fee_bp = 2.0 * fee_per_side_bp
+            gross_for_label = _gross_for(cost_model)
+            mask_for_label = is_trade & cross_mask_full if fill_model == "cross" else is_trade
+            per_symbol[str(s)][label] = _agg_metrics(
+                gross_for_label[m] - rt_fee_bp,
                 ret_bp[m],
-                (is_trade & (cross_mask_full if data["fill_model"] == "cross" else np.ones_like(is_trade)))[m],
+                mask_for_label[m],
                 side[m],
             )
-            for label, data in (
-                ("taker", by_scenario["taker"]),
-                ("maker_best", by_scenario["maker_best"]),
-                ("maker_zero", by_scenario["maker_zero"]),
-                ("maker_cross", by_scenario["maker_cross"]),
-            )
-        }
 
     return {
         "horizon": horizon.name,

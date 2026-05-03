@@ -137,10 +137,21 @@ def _compact_training_frame(
     training or holdout evaluation. Removing them before converting slices to
     numpy keeps peak RAM materially lower on small Windows boxes.
     """
-    keep: list[str] = ["symbol", "part"]
+    # ``best_bid``/``best_ask``/``spread_bp`` are required by the v2 honest
+    # backtest (taker bid-ask round-trip fills); ``gross_long_*``/``gross_short_*``
+    # let backtest reuse the exact same gross-PnL expression as labels did.
+    keep: list[str] = ["symbol", "part", "best_bid", "best_ask", "spread_bp"]
     keep.extend(feats)
     for h in horizons:
-        keep.extend((f"ret_{h.name}_bp", f"y_{h.name}_valid", f"y_{h.name}"))
+        keep.extend(
+            (
+                f"ret_{h.name}_bp",
+                f"gross_long_{h.name}_bp",
+                f"gross_short_{h.name}_bp",
+                f"y_{h.name}_valid",
+                f"y_{h.name}",
+            )
+        )
 
     seen: set[str] = set()
     existing = []

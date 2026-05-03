@@ -4,15 +4,24 @@ Metrics we care about for a market-taking strategy:
 
 - ``AUC (UP vs DOWN)`` — pure ranking ability, ignores FLAT class.
 - ``hit_rate@thr`` — fraction of confidently-predicted directions that
-  realised in the right direction (excluding FLAT-realised cases).
-- ``avg_net_bp@thr`` — average realised return per "trade" net of
-  taker fees + half-spread. Negative means the model loses money.
+  realised the right *taker round-trip* sign (i.e. ``gross_long`` > 0
+  for longs / ``gross_short`` > 0 for shorts — NOT mid-to-mid sign).
+- ``avg_net_bp@thr`` — average realised P&L per trade in bp, including
+  the bid-ask spread and ``2 × taker_fee`` round-trip commission.
+  Negative means the model loses money.
 - ``sim_sharpe_per_day`` — naive Sharpe assuming i.i.d. trades and
   86_400 / horizon trades per day.
 
+The v1 implementation used ``signed_mid_return`` as the realised P&L,
+which silently *omitted* the bid-ask spread cost — making backtest /
+holdout numbers look much better than what the live taker actually
+earned. The v2 ``gross_long``/``gross_short`` columns from
+:mod:`backend.ml.labels` already deduct the spread, so the only fee
+left to subtract here is the round-trip commission.
+
 These are coarse metrics. They don't model order book impact or
-queue position; that comes in MVP-2. For MVP-1 they're enough to tell
-us whether there's *any* edge in the features.
+queue position; for MVP-1 they're enough to tell us whether there's
+*any* edge in the features after honest costs.
 """
 
 from __future__ import annotations
@@ -105,6 +114,22 @@ def evaluate_holdout(
     y = test[f"y_{horizon.name}"].to_numpy()
     ret_bp = test[f"ret_{horizon.name}_bp"].to_numpy().astype(np.float64)
 
+    long_col = f"gross_long_{horizon.name}_bp"
+    short_col = f"gross_short_{horizon.name}_bp"
+    if long_col in test.columns and short_col in test.columns:
+        gross_long_bp = test[long_col].to_numpy().astype(np.float64)
+        gross_short_bp = test[short_col].to_numpy().astype(np.float64)
+    else:
+        # Legacy v1 frames: fall back to mid-to-mid * side, which IGNORES
+        # the spread. Headline metrics will look optimistic.
+        log.warning(
+            "eval %s: missing gross_long/short columns; falling back to "
+            "mid-to-mid (this MISSES the bid-ask spread cost)",
+            horizon.name,
+        )
+        gross_long_bp = ret_bp
+        gross_short_bp = -ret_bp
+
     p = booster.predict(X)  # shape (n, 3)
 
     conf = _confidence(p)
@@ -122,17 +147,24 @@ def evaluate_holdout(
     trade_mask = np.abs(conf) > thr
     n_trades = int(trade_mask.sum())
     side = np.sign(conf)
-    realized_bp = ret_bp * side  # signed realised return for our hypothetical trade
+    # Honest taker round-trip P&L: pick the side-matched gross column
+    # (already nets the spread) then deduct round-trip commission.
+    gross_bp = np.where(
+        side > 0,
+        gross_long_bp,
+        np.where(side < 0, gross_short_bp, 0.0),
+    )
     cost_bp = 2.0 * TAKER_FEE_BP  # entry + exit
-    net_bp = realized_bp - cost_bp
+    net_bp = gross_bp - cost_bp
 
     if n_trades > 0:
         avg_net = float(net_bp[trade_mask].mean())
         std_net = float(net_bp[trade_mask].std())
-        # Hit rate: realised in same direction as our trade, excluding FLAT-realisations.
-        realized_dir = np.sign(ret_bp[trade_mask])
+        # Hit rate: spread-aware — a "hit" is a side-matched gross > 0,
+        # i.e. the round-trip cleared the spread (commission still ahead).
+        realized_dir = np.sign(gross_bp[trade_mask])
         traded_side = side[trade_mask]
-        hits = int(((realized_dir != 0) & (realized_dir == traded_side)).sum())
+        hits = int(((realized_dir > 0) & (realized_dir == traded_side)).sum())
         hit_rate = hits / max(int((realized_dir != 0).sum()), 1)
     else:
         avg_net = float("nan")
@@ -164,8 +196,8 @@ def evaluate_holdout(
                 "n_trades": int(md.sum()),
                 "avg_net_bp": float(net_bp[md].mean()),
                 "hit_rate": float(
-                    ((np.sign(ret_bp[md]) != 0) & (np.sign(ret_bp[md]) == side[md])).sum()
-                    / max(int((np.sign(ret_bp[md]) != 0).sum()), 1)
+                    ((np.sign(gross_bp[md]) > 0) & (np.sign(gross_bp[md]) == side[md])).sum()
+                    / max(int((np.sign(gross_bp[md]) != 0).sum()), 1)
                 ),
             }
 
