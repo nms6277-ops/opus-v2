@@ -111,29 +111,48 @@ class BinanceRest:
         url = f"{self._base}{path}"
         signed = self._sign(params)
         r = await self._client.post(url, params=signed)
-        r.raise_for_status()
+        self._raise_for_status(r, "POST", path)
         return r.json()
 
     async def _signed_put(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         url = f"{self._base}{path}"
         signed = self._sign(params)
         r = await self._client.put(url, params=signed)
-        r.raise_for_status()
+        self._raise_for_status(r, "PUT", path)
         return r.json()
 
-    async def _signed_get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any] | list[Any]:
+    async def _signed_get(
+        self, path: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any] | list[Any]:
         url = f"{self._base}{path}"
         signed = self._sign(params or {})
         r = await self._client.get(url, params=signed)
-        r.raise_for_status()
+        self._raise_for_status(r, "GET", path)
         return r.json()
 
     async def _signed_delete(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         url = f"{self._base}{path}"
         signed = self._sign(params)
         r = await self._client.delete(url, params=signed)
-        r.raise_for_status()
+        self._raise_for_status(r, "DELETE", path)
         return r.json()
+
+    @staticmethod
+    def _raise_for_status(response: httpx.Response, method: str, path: str) -> None:
+        """Surface the Binance error body in the exception message.
+
+        ``httpx.Response.raise_for_status`` only includes the status code,
+        which is useless for diagnosing rejected orders (the actionable
+        part is in the JSON body, e.g. ``-2021 Order would immediately
+        trigger.``). We re-raise with the body inlined so live-trader
+        rejections show up readable in logs.
+        """
+
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            body = response.text[:1000]
+            raise RuntimeError(f"Binance {method} {path} failed {response.status_code}: {body}") from e
 
     async def place_order(
         self,
@@ -142,8 +161,10 @@ class BinanceRest:
         order_type: str,
         quantity: float,
         price: float | None = None,
+        stop_price: float | None = None,
         time_in_force: str = "GTC",
         reduce_only: bool = False,
+        working_type: str | None = None,
         client_order_id: str | None = None,
     ) -> dict[str, Any]:
         """POST /fapi/v1/order. Raises if not configured."""
@@ -158,6 +179,17 @@ class BinanceRest:
                 raise ValueError("LIMIT order requires price")
             params["price"] = f"{price}"
             params["timeInForce"] = time_in_force
+        if order_type.upper() in {
+            "STOP",
+            "STOP_MARKET",
+            "TAKE_PROFIT",
+            "TAKE_PROFIT_MARKET",
+        }:
+            if stop_price is None:
+                raise ValueError(f"{order_type.upper()} order requires stop_price")
+            params["stopPrice"] = f"{stop_price}"
+        if working_type:
+            params["workingType"] = working_type
         if reduce_only:
             params["reduceOnly"] = "true"
         if client_order_id:
@@ -165,9 +197,7 @@ class BinanceRest:
         return await self._signed_post("/fapi/v1/order", params)
 
     async def cancel_all(self, symbol: str) -> dict[str, Any]:
-        return await self._signed_delete(
-            "/fapi/v1/allOpenOrders", {"symbol": symbol.upper()}
-        )
+        return await self._signed_delete("/fapi/v1/allOpenOrders", {"symbol": symbol.upper()})
 
     async def set_leverage(self, symbol: str, leverage: int) -> dict[str, Any]:
         return await self._signed_post(

@@ -161,6 +161,12 @@ class Settings(BaseSettings):
     # Stop-loss in basis points (price moves against us). Set high to disable.
     trade_stop_loss_bp: float = Field(50.0, ge=0.0)
 
+    # Take-profit in basis points (price moves in our favour). 0 disables it.
+    # When non-zero a reduce-only TAKE_PROFIT_MARKET order is armed on Binance
+    # alongside the entry MARKET order so the exit fires even if the bot is
+    # offline or its private WS is silent.
+    trade_take_profit_bp: float = Field(0.0, ge=0.0)
+
     @field_validator("trade_symbols", mode="before")
     @classmethod
     def _split_trade_symbols(cls, v):

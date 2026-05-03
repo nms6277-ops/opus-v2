@@ -68,6 +68,11 @@ class FakeRest:
         self.flattened.append((symbol, position_amt))
         return {"symbol": symbol, "positionAmt": position_amt}
 
+    async def position_risk(self, symbol=None):
+        # Mirror the live REST shape but with no pre-existing positions.
+        target = (symbol or "").upper()
+        return [{"symbol": target, "positionAmt": "0"}]
+
 
 def _state_with_symbol(*, live=True):
     state = AppState()
@@ -141,13 +146,21 @@ async def test_live_trader_sets_leverage_and_places_opus_market_order():
     await trader.on_snapshot("UBUSDT", _snap())
 
     assert rest.leverage_calls == [("UBUSDT", 10)]
-    assert len(rest.orders) == 1
-    order = rest.orders[0]
-    assert order["symbol"] == "UBUSDT"
-    assert order["side"] == "BUY"
-    assert order["order_type"] == "MARKET"
-    assert order["quantity"] == pytest.approx(6.0 / 1.001)
-    assert order["client_order_id"].startswith("OPUS_UBUSDT_")
+    # Entry MARKET + reduce-only STOP_MARKET (default trade_stop_loss_bp=50).
+    market_orders = [o for o in rest.orders if o["order_type"] == "MARKET"]
+    stop_orders = [o for o in rest.orders if o["order_type"] == "STOP_MARKET"]
+    assert len(market_orders) == 1, rest.orders
+    assert len(stop_orders) == 1, rest.orders
+    entry = market_orders[0]
+    assert entry["symbol"] == "UBUSDT"
+    assert entry["side"] == "BUY"
+    assert entry["quantity"] == pytest.approx(6.0 / 1.001)
+    assert entry["client_order_id"].startswith("OPUS_UBUSDT_")
+    stop = stop_orders[0]
+    assert stop["side"] == "SELL"  # close-side
+    assert stop["reduce_only"] is True
+    assert stop["working_type"] == "MARK_PRICE"
+    assert stop["client_order_id"].startswith("OPUS_SL_UBUSDT_")
     assert state.symbols["UBUSDT"].position_base == pytest.approx(6.0 / 1.001)
 
 
@@ -329,3 +342,222 @@ async def test_live_trader_stop_cancels_and_flattens_managed_symbols():
 
     assert rest.cancelled == ["UBUSDT"]
     assert rest.flattened == [("UBUSDT", 3.0)]
+
+
+# ---------------------------------------------------------------------------
+# Tests for v3-ported live-trading features:
+#   - reconcile_open_positions (fail-closed startup)
+#   - on_order_update (real fill tracking via private WS)
+#   - on_account_update (position sync)
+#   - _arm_protective_orders (STOP/TP on Binance)
+#   - stats_dict (UI panel data)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reconcile_open_positions_disables_symbol_with_existing_position():
+    """If Binance already has a position on startup, the symbol must be disabled."""
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+
+    async def position_risk(symbol=None):  # pre-existing position!
+        return [{"symbol": (symbol or "").upper(), "positionAmt": "3.5"}]
+
+    rest.position_risk = position_risk
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    await trader.start()
+
+    stats = state.symbols["UBUSDT"]
+    assert stats.live_state == "disabled"
+    assert "pre-existing Binance position" in (stats.block_reason or "")
+
+
+@pytest.mark.asyncio
+async def test_reconcile_open_positions_disables_on_rest_error():
+    """REST failure during reconciliation must fail closed (disable symbol)."""
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+
+    async def position_risk(symbol=None):
+        raise RuntimeError("Binance 502")
+
+    rest.position_risk = position_risk
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    await trader.start()
+
+    stats = state.symbols["UBUSDT"]
+    assert stats.live_state == "disabled"
+    assert "position reconciliation failed" in (stats.block_reason or "")
+
+
+@pytest.mark.asyncio
+async def test_arm_protective_orders_places_stop_when_take_profit_disabled():
+    """Default config has trade_take_profit_bp=0 — only STOP_MARKET is armed."""
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    await trader.start()
+
+    await trader.on_snapshot("UBUSDT", _snap())
+
+    stops = [o for o in rest.orders if o["order_type"] == "STOP_MARKET"]
+    tps = [o for o in rest.orders if o["order_type"] == "TAKE_PROFIT_MARKET"]
+    assert len(stops) == 1
+    assert len(tps) == 0
+    stop = stops[0]
+    assert stop["reduce_only"] is True
+    assert stop["working_type"] == "MARK_PRICE"
+    # Long entry @ 1.001, stop_loss_bp=50 → stop ≈ 1.001 * (1 - 0.005) = 0.99600
+    assert stop["stop_price"] == pytest.approx(1.001 * (1 - 50.0 / 10_000.0), rel=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_arm_protective_orders_places_take_profit_when_enabled(monkeypatch):
+    """trade_take_profit_bp > 0 also arms TAKE_PROFIT_MARKET."""
+    from backend.config import settings as cfg
+
+    monkeypatch.setattr(cfg, "trade_take_profit_bp", 80.0)
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    await trader.start()
+
+    await trader.on_snapshot("UBUSDT", _snap())
+
+    tps = [o for o in rest.orders if o["order_type"] == "TAKE_PROFIT_MARKET"]
+    assert len(tps) == 1
+    tp = tps[0]
+    assert tp["reduce_only"] is True
+    assert tp["side"] == "SELL"
+    # Long entry @ 1.001, take_profit_bp=80 → tp ≈ 1.001 * (1 + 0.008)
+    assert tp["stop_price"] == pytest.approx(1.001 * (1 + 80.0 / 10_000.0), rel=1e-6)
+    assert tp["client_order_id"].startswith("OPUS_TP_UBUSDT_")
+
+
+@pytest.mark.asyncio
+async def test_arm_protective_orders_failure_does_not_rollback_entry(caplog):
+    """If STOP/TP placement fails the entry stays — bot still monitors via snapshot loop."""
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+    real_place = rest.place_order
+
+    async def place_order(**kwargs):
+        if kwargs.get("order_type") == "STOP_MARKET":
+            raise RuntimeError("Binance -2021 stop would trigger immediately")
+        return await real_place(**kwargs)
+
+    rest.place_order = place_order
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    await trader.start()
+    await trader.on_snapshot("UBUSDT", _snap())
+
+    # Entry MARKET succeeded and local position exists despite STOP failure.
+    market_orders = [o for o in rest.orders if o["order_type"] == "MARKET"]
+    assert len(market_orders) == 1
+    assert "UBUSDT" in trader._positions
+
+
+@pytest.mark.asyncio
+async def test_on_order_update_records_realized_pnl_exactly_once_with_dedupe():
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    # No start() — we're testing the handler in isolation, so reconcile is bypassed.
+
+    fill_event = {
+        "e": "ORDER_TRADE_UPDATE",
+        "o": {
+            "s": "UBUSDT",
+            "S": "SELL",
+            "X": "FILLED",
+            "c": "OPUS_FLATTEN_UBUSDT_1",
+            "i": 12345,
+            "t": 999,
+            "z": "5.0",
+            "ap": "1.005",
+            "rp": "0.42",
+            "R": True,
+        },
+    }
+    trader.on_order_update(fill_event)
+    # Re-deliver same trade-id (Binance reconnect replay) — must NOT double-count.
+    trader.on_order_update(fill_event)
+
+    stats = state.symbols["UBUSDT"]
+    assert stats.realized_pnl == pytest.approx(0.42)
+    assert state.guards.daily_pnl == pytest.approx(0.42)
+    assert stats.fills_count == 1
+
+
+@pytest.mark.asyncio
+async def test_on_account_update_syncs_position_fields_and_clears_when_flat():
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    trader.on_account_update(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "a": {
+                "P": [
+                    {"s": "UBUSDT", "pa": "5.0", "ep": "1.0", "up": "0.10"},
+                ]
+            },
+        }
+    )
+    stats = state.symbols["UBUSDT"]
+    assert stats.position_base == pytest.approx(5.0)
+    assert stats.position_entry == pytest.approx(1.0)
+    assert stats.unrealized_pnl == pytest.approx(0.10)
+
+    # Position closed externally → bot must clean up its own tracking.
+    trader._positions["UBUSDT"] = SimpleNamespace()  # type: ignore[assignment]
+    trader.on_account_update(
+        {
+            "e": "ACCOUNT_UPDATE",
+            "a": {"P": [{"s": "UBUSDT", "pa": "0", "ep": "0", "up": "0"}]},
+        }
+    )
+    assert state.symbols["UBUSDT"].position_base == 0.0
+    assert state.symbols["UBUSDT"].position_entry == 0.0
+    assert "UBUSDT" not in trader._positions
+
+
+@pytest.mark.asyncio
+async def test_stats_dict_returns_open_positions_and_daily_aggregates():
+    state = _state_with_symbol(live=True)
+    state.symbols["UBUSDT"].live_trade_count = 3
+    state.symbols["UBUSDT"].live_wins = 2
+    state.symbols["UBUSDT"].live_losses = 1
+    rest = FakeRest()
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    await trader.start()
+    await trader.on_snapshot("UBUSDT", _snap())
+    state.guards.daily_pnl = 1.23  # set AFTER start (which clears via reset_if_new_day)
+
+    out = trader.stats_dict()
+    assert out["daily_trades"] == 3
+    assert out["daily_wins"] == 2
+    assert out["daily_losses"] == 1
+    assert out["daily_win_rate"] == pytest.approx(2 / 3)
+    assert out["daily_pnl_usd"] == pytest.approx(1.23)
+    assert "UBUSDT" in out["allowed_symbols"]
+    assert len(out["open_positions"]) == 1
+    pos = out["open_positions"][0]
+    assert pos["symbol"] == "UBUSDT"
+    assert pos["side"] == "long"

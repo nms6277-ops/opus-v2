@@ -33,6 +33,7 @@ from backend.adaptive_sdk import (
 from backend.adaptive_sdk import (
     TradeTick as SDKTradeTick,
 )
+from backend.collector.live_trade_log import LiveTradeLogWriter
 from backend.collector.lob import OrderBook, Trade
 from backend.collector.trade_log import TradeLogWriter
 from backend.collector.writer import SnapshotWriter
@@ -177,6 +178,9 @@ class Runtime:
         self._trader: Trader | None = None
         self._predictor: Predictor | None = None
         self._trade_log: TradeLogWriter | None = None
+        # JSONL append-only log of Binance USER-DATA stream events; live
+        # fills survive a process crash without parquet read-rewrite.
+        self._live_trade_log: LiveTradeLogWriter = LiveTradeLogWriter(data_dir=settings.data_dir)
         self._telegram = TelegramNotifier(self.state)
         self._trade_log_task: asyncio.Task | None = None
         self._ws_watchdog_task: asyncio.Task | None = None
@@ -257,6 +261,7 @@ class Runtime:
                 predictor=self._predictor,
                 runtime_settings=self.runtime_settings,
                 on_risk_event=self._on_risk_event,
+                live_trade_log=self._live_trade_log,
             )
         # COLLECT and PAPER both use PaperTrader; in COLLECT mode the snapshot
         # loop just doesn't call ``on_snapshot``.
@@ -746,11 +751,23 @@ class Runtime:
         self.state.binance_private_last_msg_ts = ts
 
     def _on_binance_order_update(self, data: dict) -> None:
-        # LiveTrader reconciliation is wired in the live-execution task.
+        # Dispatch to the active trader if it exposes a handler. Only
+        # LiveTrader does; paper/collect modes ignore order events.
+        handler = getattr(self._trader, "on_order_update", None)
+        if callable(handler):
+            try:
+                handler(data)
+            except Exception as e:
+                log.error("runtime: on_order_update handler failed: %s", e)
         log.debug("runtime: Binance order update %s", data.get("o", {}).get("s", ""))
 
     def _on_binance_account_update(self, data: dict) -> None:
-        # LiveTrader reconciliation is wired in the live-execution task.
+        handler = getattr(self._trader, "on_account_update", None)
+        if callable(handler):
+            try:
+                handler(data)
+            except Exception as e:
+                log.error("runtime: on_account_update handler failed: %s", e)
         log.debug("runtime: Binance account update reason=%s", data.get("a", {}).get("m", ""))
 
     # ------------------------------------------------------------------
