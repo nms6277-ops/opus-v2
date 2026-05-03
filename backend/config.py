@@ -44,17 +44,37 @@ class Settings(BaseSettings):
     parquet_rotation_min: int = 60
 
     # Collector
-    snapshot_interval_ms: int = 250
+    #
+    # 100 ms is the v2 default (was 250 ms). Higher sampling -> more rows per
+    # in-play window -> more training data on a 4-6 hour collection. Disk grows
+    # ~2.4x; budget at 100 ms is ~720 MB/day across 9 alts after zstd.
+    snapshot_interval_ms: int = 100
     lob_depth: int = 200
     snapshot_depth: int = 40
 
     # Raw logs (tick-level). Both optional; disk budget is the trade-off.
     collect_raw_depth: bool = False    # every depthUpdate, ~1-3 MB/symbol/hr after zstd
-    collect_raw_trades: bool = False   # every aggTrade, ~0.5-5 MB/symbol/hr after zstd
+    # collect_raw_trades is auto-enabled when feed_sdk_from_trade_log is true,
+    # because the offline replay needs the full trade stream to reproduce the
+    # SDK state. ~0.5-5 MB/symbol/hr after zstd.
+    collect_raw_trades: bool = False
 
     # Price-bucket aggregations (in bp, +/- from mid) written into each snapshot row.
     # Tick-size-independent features that work on any symbol.
     bucket_bps: Annotated[tuple[int, ...], NoDecode] = (5, 10, 25, 50)
+
+    # v2 wide-band buckets: non-cumulative slices of +/- band_bps_max bp around
+    # mid in band_bps_step steps. Default (50, 5) -> 20 bid + 20 ask bands.
+    # Set band_bps_max=0 to disable.
+    band_bps_max: int = Field(50, ge=0, le=500)
+    band_bps_step: int = Field(5, ge=1, le=50)
+
+    # Adaptive SDK integration. When true, the runtime feeds every Binance
+    # trade tick into backend.adaptive_sdk and samples the resulting state at
+    # each snapshot tick into 'sdk_*' columns (VPIN, flow Z-scores, realized
+    # vol, ...). Pure addition; the rest of the pipeline ignores the columns
+    # if the model wasn't trained with them.
+    enable_adaptive_sdk: bool = True
 
     # Exchanges.
     #
@@ -116,6 +136,13 @@ class Settings(BaseSettings):
     # symbols but only trade 3.
     trade_symbols: Annotated[tuple[str, ...], NoDecode] = ()
 
+    # Symbols excluded from training by default (still collectable). BTC/ETH
+    # have spreads <1 bp -> mid-to-mid edges of 1-3 bp would be erased by any
+    # honest taker round-trip on micro-cap altcoins, so pooling them with the
+    # in-play coins biases the model toward a regime we never trade. Override
+    # with --include-symbols on the train CLI if needed.
+    train_symbol_blocklist: Annotated[tuple[str, ...], NoDecode] = ("BTCUSDT", "ETHUSDT")
+
     # Confidence is `P(UP) - P(DOWN)` in [-1, 1]. Trade only when the absolute
     # confidence exceeds this threshold.
     trade_conf_threshold: float = Field(0.10, ge=0.0, le=1.0)
@@ -151,6 +178,17 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return tuple(int(x) for x in v.split(",") if x.strip())
         return v
+
+    @field_validator("train_symbol_blocklist", mode="before")
+    @classmethod
+    def _split_train_blocklist(cls, v):
+        if v is None or v == "":
+            return ()
+        if isinstance(v, str):
+            return tuple(s.strip().upper() for s in v.split(",") if s.strip())
+        if isinstance(v, (list, tuple)):
+            return tuple(str(s).strip().upper() for s in v if str(s).strip())
+        return ()
 
 
 settings = Settings()

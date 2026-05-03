@@ -21,6 +21,12 @@ from pathlib import Path
 
 import orjson
 
+from backend.adaptive_sdk import (
+    AdaptiveAnalyticsSDK,
+    BookSnapshot as SDKBookSnapshot,
+    GlobalConfig as SDKGlobalConfig,
+    TradeTick as SDKTradeTick,
+)
 from backend.collector.lob import OrderBook, Trade
 from backend.collector.trade_log import TradeLogWriter
 from backend.collector.writer import SnapshotWriter
@@ -108,6 +114,28 @@ class SymbolCtx:
     by_best_bid: float = 0.0
     by_best_ask: float = 0.0
 
+    # SDK is registered lazily on first trade; this flag avoids the dict
+    # lookup on every tick once registered.
+    sdk_registered: bool = False
+
+
+def _sdk_state_to_columns(state) -> dict[str, float]:
+    """Map an :class:`adaptive_sdk.SymbolState` to a flat column dict.
+
+    Returns columns prefixed with ``sdk_`` so they're easy to filter at the
+    feature-selection layer. Always returns the same set of keys (zero-valued
+    when the SDK is still warming up) so the parquet schema stays stable.
+    """
+    return {
+        "sdk_is_ready": 1.0 if state.is_ready else 0.0,
+        "sdk_vpin": float(state.vpin),
+        "sdk_buy_flow_z": float(state.buy_exhaustion_z),
+        "sdk_sell_flow_z": float(state.sell_exhaustion_z),
+        "sdk_realized_vol": float(state.realized_vol),
+        "sdk_buckets_filled": float(state.buckets_filled),
+        "sdk_pending_signals": float(state.pending_signals_count),
+    }
+
 
 class Runtime:
     def __init__(self, state: AppState | None = None) -> None:
@@ -147,6 +175,13 @@ class Runtime:
         self._trade_log_task: asyncio.Task | None = None
         self._ws_watchdog_task: asyncio.Task | None = None
         self._stopped = False
+
+        # Adaptive analytics SDK (VPIN, exhaustion, OBI). Pure side-channel:
+        # never gates trading; only emits 'sdk_*' columns into snapshots.
+        # Stays None when settings.enable_adaptive_sdk is False.
+        self._sdk: AdaptiveAnalyticsSDK | None = (
+            AdaptiveAnalyticsSDK(SDKGlobalConfig()) if settings.enable_adaptive_sdk else None
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -303,6 +338,12 @@ class Runtime:
             rotation_min=settings.parquet_rotation_min,
         )
         ctx = SymbolCtx(symbol=symbol, ob=ob, writer=writer)
+        if self._sdk is not None:
+            try:
+                self._sdk.register_symbol(symbol)
+                ctx.sdk_registered = True
+            except Exception as e:
+                log.warning("runtime: SDK register %s failed: %s", symbol, e)
         ctx.writer_flush_task = asyncio.create_task(writer.periodic_flush(10.0), name=f"writer-{symbol}")
         if settings.collect_raw_depth:
             raw_d = SnapshotWriter(
@@ -422,6 +463,8 @@ class Runtime:
         ctx = self.symbols.pop(symbol)
         await self._stop_symbol_tasks(ctx)
         await ctx.writer.close()
+        # SDK has no unregister_symbol; leave the per-symbol context in
+        # memory (small) so re-add_symbol resumes its warmup state.
 
         if self._trader is not None:
             await self._trader.cancel_all(symbol)
@@ -476,12 +519,22 @@ class Runtime:
         while True:
             try:
                 await asyncio.sleep(interval)
+                sdk_cols: dict[str, float] | None = None
+                if self._sdk is not None and ctx.sdk_registered:
+                    try:
+                        sdk_state = self._sdk.get_state(ctx.symbol)
+                        sdk_cols = _sdk_state_to_columns(sdk_state)
+                    except Exception as e:
+                        log.debug("runtime: SDK get_state %s failed: %s", ctx.symbol, e)
                 snap = snap_mod.build(
                     ctx.ob,
                     depth=settings.snapshot_depth,
                     trade_window_ms=1000,
                     now_ms=_snapshot_now_ms(ctx.ob, int(time.time() * 1000)),
                     bucket_bps=settings.bucket_bps,
+                    band_bps_max=settings.band_bps_max,
+                    band_bps_step=settings.band_bps_step,
+                    sdk_columns=sdk_cols,
                 )
                 if snap is None:
                     continue
@@ -584,6 +637,34 @@ class Runtime:
         except (KeyError, ValueError, TypeError):
             return
         ctx.ob.add_trade(Trade(ts_ms=ts, price=price, qty=qty, is_buyer_maker=is_buyer_maker))
+        if self._sdk is not None and ctx.sdk_registered:
+            try:
+                self._sdk.on_trade(
+                    SDKTradeTick(
+                        symbol=symbol,
+                        price=price,
+                        quantity=qty,
+                        is_buyer_maker=is_buyer_maker,
+                        timestamp=ts / 1000.0,
+                    )
+                )
+                # Push best-bid / best-ask volume so the SDK's OBI confidence
+                # multiplier has a value (otherwise it stays at 1.0). Cheap.
+                if ctx.ob.bids and ctx.ob.asks:
+                    bb_p, bb_q = next(iter(sorted(ctx.ob.bids.items(), key=lambda kv: -kv[0])))
+                    ba_p, ba_q = next(iter(sorted(ctx.ob.asks.items(), key=lambda kv: kv[0])))
+                    self._sdk.on_book_update(
+                        SDKBookSnapshot(
+                            symbol=symbol,
+                            best_bid=float(bb_p),
+                            best_ask=float(ba_p),
+                            bid_vol=float(bb_q),
+                            ask_vol=float(ba_q),
+                            timestamp=ts / 1000.0,
+                        )
+                    )
+            except Exception as e:
+                log.debug("runtime: SDK on_trade %s failed: %s", symbol, e)
         stats = self.state.symbols.get(symbol)
         if stats is not None:
             stats.last_trade_price = price
