@@ -1,3 +1,4 @@
+import asyncio
 import time
 from types import SimpleNamespace
 
@@ -647,3 +648,93 @@ async def test_stats_dict_returns_open_positions_and_daily_aggregates():
     pos = out["open_positions"][0]
     assert pos["symbol"] == "UBUSDT"
     assert pos["side"] == "long"
+
+
+@pytest.mark.asyncio
+async def test_break_even_fill_still_records_trade_outcome():
+    """A reduce-only FILLED with rp=0.0 must still feed the regime guards."""
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    initial = state.symbols["UBUSDT"].live_trade_count
+
+    trader.on_order_update(
+        {
+            "e": "ORDER_TRADE_UPDATE",
+            "o": {
+                "s": "UBUSDT",
+                "S": "SELL",
+                "X": "FILLED",
+                "c": "OPUS_FLATTEN_UBUSDT_77",
+                "i": 4242,
+                "t": 4242,
+                "z": "5.0",
+                "ap": "1.001",
+                "rp": "0.0",
+                "R": True,
+            },
+        }
+    )
+
+    # Probation / loss-streak counters must reflect the round-trip even at
+    # break-even. Without this the trade is invisible to all regime guards.
+    assert state.symbols["UBUSDT"].live_trade_count == initial + 1
+
+
+@pytest.mark.asyncio
+async def test_maybe_close_cancels_protective_orders_before_flatten():
+    """``_maybe_close`` must cancel the resting STOP/TP before sending the
+    flatten MARKET; otherwise the unrelated protective survives on Binance
+    and can trigger against the next position."""
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+    rest.positions["UBUSDT"] = 6.0
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    await trader.start()
+    await trader.on_snapshot("UBUSDT", _snap())
+    pos = trader._positions["UBUSDT"]
+
+    snap = _snap()
+    snap["ts_ms"] = pos.ts_open_ms + pos.horizon_ms + 1000
+    await trader.on_snapshot("UBUSDT", snap)
+
+    # cancel_all must have been called for the symbol, BEFORE the flatten.
+    assert rest.cancelled, "cancel_all(symbol) must run during _maybe_close"
+    assert "UBUSDT" in [s.upper() for s in rest.cancelled]
+    assert rest.flattened, "flatten must still execute"
+
+
+@pytest.mark.asyncio
+async def test_on_order_update_cancels_protective_orders_after_exchange_close():
+    """When STOP_MARKET fires on the exchange, the resting TAKE_PROFIT_MARKET
+    must be cancelled so it does not trigger against the next entry."""
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+
+    trader.on_order_update(
+        {
+            "e": "ORDER_TRADE_UPDATE",
+            "o": {
+                "s": "UBUSDT",
+                "S": "SELL",
+                "X": "FILLED",
+                "c": "OPUS_SL_UBUSDT_999",
+                "i": 8888,
+                "t": 8888,
+                "z": "5.0",
+                "ap": "0.996",
+                "rp": "-0.025",
+                "R": True,
+            },
+        }
+    )
+    # Allow the create_task'd cancel_all to run on the test loop.
+    await asyncio.sleep(0)
+    assert "UBUSDT" in [s.upper() for s in rest.cancelled]

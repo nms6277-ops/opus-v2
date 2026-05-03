@@ -226,28 +226,42 @@ class LiveTrader(Trader):
                 self._close_order_pnl[close_key] = self._close_order_pnl.get(close_key, 0.0) + realized_pnl
             if status == "FILLED":
                 close_pnl = self._close_order_pnl.pop(close_key, realized_pnl)
-                if close_pnl:
-                    event = record_trade_outcome(
-                        self.state,
-                        symbol=symbol,
-                        pnl_usd=close_pnl,
-                        net_bp=self._net_bp_from_realized(stats, close_pnl, filled_qty, avg_price),
-                        settings=self.runtime_settings,
-                    )
-                    if event is not None and self._on_risk_event is not None:
-                        # Risk-event sink is async (Telegram I/O); dispatch
-                        # via the running loop without awaiting because
-                        # ``on_order_update`` itself is sync (called from
-                        # the private-WS receive loop).
-                        try:
-                            loop = asyncio.get_running_loop()
-                            loop.create_task(self._on_risk_event(event))
-                        except RuntimeError:
-                            log.warning("live: risk event %s dropped (no running loop)", event.reason)
+                # Always record the outcome on a FILLED reduce-only close,
+                # even when ``close_pnl == 0.0`` (a break-even round-trip).
+                # Skipping break-evens would leave them invisible to
+                # loss-streak / rolling-degradation counters and undercount
+                # the probation trade-count.
+                event = record_trade_outcome(
+                    self.state,
+                    symbol=symbol,
+                    pnl_usd=close_pnl,
+                    net_bp=self._net_bp_from_realized(stats, close_pnl, filled_qty, avg_price),
+                    settings=self.runtime_settings,
+                )
+                if event is not None and self._on_risk_event is not None:
+                    # Risk-event sink is async (Telegram I/O); dispatch
+                    # via the running loop without awaiting because
+                    # ``on_order_update`` itself is sync (called from
+                    # the private-WS receive loop).
+                    try:
+                        loop = asyncio.get_running_loop()
+                        loop.create_task(self._on_risk_event(event))
+                    except RuntimeError:
+                        log.warning("live: risk event %s dropped (no running loop)", event.reason)
                 stats.position_base = 0.0
                 stats.position_entry = 0.0
                 stats.unrealized_pnl = 0.0
                 self._positions.pop(symbol, None)
+                # When STOP_MARKET or TAKE_PROFIT_MARKET fires on the
+                # exchange, the OTHER protective is still resting on
+                # Binance. Cancel everything for this symbol so the next
+                # entry does not trip a stale SL/TP at a price level that
+                # belonged to the previous position.
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(self.cancel_all(symbol))
+                except RuntimeError:
+                    log.warning("live: cancel_all(%s) dropped after close (no running loop)", symbol)
             return
 
         if filled_qty > 0.0 and avg_price > 0.0 and side in {"BUY", "SELL"}:
@@ -592,6 +606,13 @@ class LiveTrader(Trader):
         # generated and the missing PnL accurately reflects the
         # never-closed position; ``reconcile_open_positions`` will
         # disable the symbol on next start.
+        #
+        # Cancel the resting STOP_MARKET / TAKE_PROFIT_MARKET protective
+        # orders BEFORE sending the reduce-only MARKET flatten. If we did
+        # not, those orders would survive on Binance and could trigger
+        # against the next position opened on this symbol at a stale
+        # price level — an uncontrolled exit with garbage PnL.
+        await self.cancel_all(symbol)
         await self._flatten(symbol)
 
     @staticmethod
