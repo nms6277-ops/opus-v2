@@ -115,16 +115,17 @@ class LiveTrader(Trader):
         stats = self.state.symbols.get(symbol)
         if stats is None:
             return
-        if stats.execution_mode != "live" or stats.live_state not in {"probation_live", "active_live"}:
-            return
-
-        # If we already have an open Binance position for this symbol, the
-        # only thing on_snapshot does is run the exit checks (stop-loss /
-        # opposing-signal / horizon timeout). Skip every other gate so a
-        # transient predictor / WS issue can't strand us in a live trade.
+        # Open-position exit checks run BEFORE the execution_mode / live_state
+        # gate. If an operator disables a symbol whose position never made it
+        # back to Binance (or hasn't been popped yet), we still need stop-loss
+        # / timeout monitoring on the locally-tracked position; otherwise it
+        # gets stranded the moment the gate flips.
         if symbol in self._positions:
             pred = self._prediction(symbol, snap) if self.predictor is not None else None
             await self._maybe_close(symbol, snap, pred)
+            return
+
+        if stats.execution_mode != "live" or stats.live_state not in {"probation_live", "active_live"}:
             return
 
         if not self._private_ws_ready():

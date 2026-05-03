@@ -217,6 +217,35 @@ async def test_live_trader_closes_open_position_on_opposing_signal():
 
 
 @pytest.mark.asyncio
+async def test_live_trader_runs_exit_checks_even_after_symbol_disabled():
+    """Stranded positions must still get stop-loss/timeout exits if mode flips."""
+
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+    rest.positions["UBUSDT"] = 6.0
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    await trader.start()
+
+    # Open a real position, then have the operator disable the symbol — but
+    # simulate the path where the position remains in trader._positions
+    # (e.g. mode flipped externally without flatten_symbol).
+    await trader.on_snapshot("UBUSDT", _snap())
+    assert "UBUSDT" in trader._positions
+    pos = trader._positions["UBUSDT"]
+    state.symbols["UBUSDT"].execution_mode = "paper"
+    state.symbols["UBUSDT"].live_state = "disabled"
+
+    snap = _snap()
+    snap["ts_ms"] = pos.ts_open_ms + pos.horizon_ms + 1000
+    await trader.on_snapshot("UBUSDT", snap)
+
+    assert "UBUSDT" not in trader._positions, "exit checks must run even when symbol no longer live"
+    assert rest.flattened
+
+
+@pytest.mark.asyncio
 async def test_live_trader_records_pnl_and_realized_exactly_once_even_if_flatten_fails():
     """Even if the Binance REST flatten errors, PnL must record exactly once."""
 

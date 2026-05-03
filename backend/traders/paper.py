@@ -183,8 +183,14 @@ class PaperTrader(Trader):
         try:
             preds = self.predictor.predict(symbol, snap)
         except Exception as e:
+            # A predictor failure must NOT skip exit checks on an open
+            # position — otherwise a persistent model error would strand
+            # stop-loss and timeout monitoring. Continue with preds=None
+            # so _maybe_close still runs (its opposing-signal branch
+            # tolerates pred=None and falls through to stop-loss /
+            # horizon timeout).
             log.error("paper: predict %s failed: %s", symbol, e)
-            return
+            preds = None
         pred = preds.get(self._horizon) if preds else None
 
         # Manage existing position first (maybe close it).
