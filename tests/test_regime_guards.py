@@ -79,6 +79,25 @@ def test_four_trade_loss_streak_pauses_symbol():
     assert state.symbols["UBUSDT"].consecutive_losses == 4
 
 
+def test_break_even_trades_do_not_count_as_losses_in_streak():
+    state = _state("UBUSDT")
+    settings = _settings(global_guard_min_trades=999, symbol_guard_min_trades=999)
+
+    # 3 real losses, then 3 exact break-evens. Old logic would count all 6
+    # as consecutive losses and pause the symbol; correct logic keeps the
+    # streak at 3 (break-evens are neither wins nor losses).
+    for _ in range(3):
+        _close(state, "UBUSDT", -0.001, -1.0, settings)
+    for _ in range(3):
+        _close(state, "UBUSDT", 0.0, 0.0, settings)
+
+    stats = state.symbols["UBUSDT"]
+    assert stats.consecutive_losses == 3
+    assert stats.live_losses == 3
+    assert stats.live_wins == 0
+    assert stats.live_state != "awaiting_operator"
+
+
 def test_rolling_degradation_ignores_shallow_negative_noise():
     state = _state("UBUSDT")
     settings = _settings(global_guard_min_trades=999, symbol_guard_min_trades=999)

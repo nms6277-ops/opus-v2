@@ -790,8 +790,22 @@ class Runtime:
                         f"binance ws stale ({age_ms:.0f}ms)",
                     )
                     if self._trader is not None:
-                        for sym in list(self.symbols):
-                            await self._trader.cancel_all(sym)
+                        # Network kill switch: cancel orders AND flatten any
+                        # open live positions via reduce-only MARKETs.
+                        # cancel_all only deletes resting orders — it does
+                        # NOT close positions, so an open live trade would
+                        # otherwise stay exposed until horizon timeout.
+                        if isinstance(self._trader, LiveTrader):
+                            try:
+                                await self._trader.emergency_flatten()
+                            except Exception as e:
+                                log.error("ws_watchdog: emergency_flatten failed: %s", e)
+                        else:
+                            for sym in list(self.symbols):
+                                try:
+                                    await self._trader.cancel_all(sym)
+                                except Exception as e:
+                                    log.error("ws_watchdog: cancel_all %s failed: %s", sym, e)
             except asyncio.CancelledError:
                 break
             except Exception as e:

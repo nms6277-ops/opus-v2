@@ -82,9 +82,13 @@ def record_trade_outcome(
     if net_bp > 0:
         stats.live_wins += 1
         stats.consecutive_losses = 0
-    else:
+    elif net_bp < 0:
         stats.live_losses += 1
         stats.consecutive_losses += 1
+    # net_bp == 0.0 is a true break-even: not a win, not a loss. Don't
+    # touch the streak counter — bumping it would let a run of break-evens
+    # prematurely trip the loss-streak cooldown on micro-cap altcoins
+    # where the model's edge is 1-3 bp.
     stats.symbol_realized_pnl_12h += pnl_usd
     stats.pnl_peak_usd = max(stats.pnl_peak_usd, stats.realized_pnl)
     stats.pnl_drawdown_pct = _drawdown_pct(stats.realized_pnl, stats.pnl_peak_usd)
