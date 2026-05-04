@@ -100,3 +100,19 @@ def test_operator_emergency_stop_survives_utc_day_rollover():
     blocked = check(state, _intent("UBUSDT"), "paper")
     assert blocked is not None
     assert "emergency stop" in blocked
+
+
+def test_guards_defaults_are_clamped_to_hard_caps():
+    """Initial Guards must respect env hard caps even before the operator
+    hits ``POST /api/settings``. Otherwise the bot would tolerate losses
+    up to the (unbounded) soft env defaults on first startup, even when
+    OPUS_HARD_DAILY_LOSS_USD was explicitly pinned lower."""
+
+    from backend.config import settings
+    from backend.state import Guards
+
+    g = Guards()
+    assert g.daily_loss_limit_usd <= settings.hard_daily_loss_usd
+    assert g.max_position_usd <= settings.hard_max_notional_usd
+    assert g.max_live_symbols <= settings.hard_max_live_symbols
+    assert g.max_orders_per_min <= settings.hard_max_orders_per_min

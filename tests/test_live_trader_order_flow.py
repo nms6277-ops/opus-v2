@@ -998,3 +998,69 @@ async def test_entry_uses_instance_conf_threshold_not_module_settings():
     await trader.on_snapshot("UBUSDT", _snap())
 
     assert rest.orders == [], "instance threshold must gate the entry decision"
+
+
+@pytest.mark.asyncio
+async def test_predict_failure_during_exit_does_not_inflate_rejects():
+    """When ``predictor.predict`` raises during exit-check monitoring on
+    an open position, the live trader must NOT bump ``rejects_count`` or
+    set ``block_reason``. Stop-loss and timeout still fire on
+    ``pred=None``; surfacing 'predict failed' to the UI during routine
+    exit polling is misleading."""
+
+    state = _state_with_symbol(live=True)
+
+    class _BoomPredictor(FakePredictor):
+        def predict(self, symbol, snap):
+            raise RuntimeError("model server unreachable")
+
+    rest = FakeRest()
+    trader = LiveTrader(
+        state, predictor=_BoomPredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    await trader.start()
+
+    # Inject a locally-tracked open position so the exit branch is taken.
+    from backend.traders.live import _LivePosition
+
+    trader._positions["UBUSDT"] = _LivePosition(
+        symbol="UBUSDT",
+        side="long",
+        qty=10.0,
+        notional_usd=10.0,
+        entry_price=1.0,
+        ts_open_ms=int(time.time() * 1000) - 100,
+        horizon_ms=5_000,
+    )
+    rejects_before = state.symbols["UBUSDT"].rejects_count
+    block_before = state.symbols["UBUSDT"].block_reason
+
+    await trader.on_snapshot("UBUSDT", _snap())
+
+    # Predict failure during exit must NOT bump rejects / set block_reason.
+    assert state.symbols["UBUSDT"].rejects_count == rejects_before
+    assert state.symbols["UBUSDT"].block_reason == block_before
+
+
+@pytest.mark.asyncio
+async def test_predict_failure_during_entry_still_rejects():
+    """Sanity: the entry path keeps the existing reject behaviour. A
+    predict failure with no open position must still bump
+    ``rejects_count`` and set ``block_reason`` so the operator notices."""
+
+    state = _state_with_symbol(live=True)
+
+    class _BoomPredictor(FakePredictor):
+        def predict(self, symbol, snap):
+            raise RuntimeError("model server unreachable")
+
+    rest = FakeRest()
+    trader = LiveTrader(
+        state, predictor=_BoomPredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    await trader.start()
+
+    await trader.on_snapshot("UBUSDT", _snap())
+
+    assert state.symbols["UBUSDT"].rejects_count == 1
+    assert "predict failed" in state.symbols["UBUSDT"].block_reason

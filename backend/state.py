@@ -109,12 +109,22 @@ class SymbolStats:
 
 @dataclass
 class Guards:
-    """Live-editable safety guards. Loaded from settings on startup."""
+    """Live-editable safety guards. Loaded from settings on startup.
 
-    daily_loss_limit_usd: float = settings.daily_loss_limit_usd
-    max_position_usd: float = settings.max_position_usd
-    max_live_symbols: int = settings.max_live_symbols
-    max_orders_per_min: int = settings.max_orders_per_min
+    Each cap defaults to ``min(soft, hard)`` so the env-level *hard cap*
+    always wins on first startup — even before the operator hits
+    ``POST /api/settings``, which is the only path that re-syncs Guards
+    from RuntimeSettings (and SettingsStore already clamps RuntimeSettings
+    to the hard caps on load). Without the ``min`` wrap the bot would
+    accept losses up to the soft ``OPUS_DAILY_LOSS_LIMIT_USD`` (typical
+    $5) before any operator interaction, even when the env explicitly
+    pinned ``OPUS_HARD_DAILY_LOSS_USD`` lower (e.g. $2 for a 2 GB VPS).
+    """
+
+    daily_loss_limit_usd: float = min(settings.daily_loss_limit_usd, settings.hard_daily_loss_usd)
+    max_position_usd: float = min(settings.max_position_usd, settings.hard_max_notional_usd)
+    max_live_symbols: int = min(settings.max_live_symbols, settings.hard_max_live_symbols)
+    max_orders_per_min: int = min(settings.max_orders_per_min, settings.hard_max_orders_per_min)
     ws_stale_ms: int = settings.ws_stale_ms
     loss_12h_limit_usd: float = settings.hard_12h_loss_usd
     symbol_loss_limit_usd: float = settings.hard_symbol_loss_usd

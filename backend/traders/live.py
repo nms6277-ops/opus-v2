@@ -369,7 +369,16 @@ class LiveTrader(Trader):
         # / timeout monitoring on the locally-tracked position; otherwise it
         # gets stranded the moment the gate flips.
         if symbol in self._positions:
-            pred = self._prediction(symbol, snap) if self.predictor is not None else None
+            # Exit checks must NOT bump ``rejects_count`` or set
+            # ``block_reason`` on a predict failure: stop-loss and timeout
+            # still work with ``pred=None`` and a misleading "predict
+            # failed" UI message during routine exit monitoring would
+            # confuse the operator.
+            pred = (
+                self._prediction(symbol, snap, reject_on_failure=False)
+                if self.predictor is not None
+                else None
+            )
             await self._maybe_close(symbol, snap, pred)
             return
 
@@ -678,11 +687,19 @@ class LiveTrader(Trader):
         sign = 1.0 if pos.side == "long" else -1.0
         return sign * (mark_price - pos.entry_price) / pos.entry_price * 10_000.0
 
-    def _prediction(self, symbol: str, snap: dict[str, Any]):
+    def _prediction(self, symbol: str, snap: dict[str, Any], *, reject_on_failure: bool = True):
         try:
             preds = self.predictor.predict(symbol, snap) if self.predictor is not None else None
         except Exception as e:
-            self._reject_symbol(symbol, f"predict failed: {e}")
+            if reject_on_failure:
+                self._reject_symbol(symbol, f"predict failed: {e}")
+            else:
+                # Exit-path: keep rejects_count / block_reason untouched
+                # so the operator's UI does not flash "predict failed"
+                # during routine stop-loss / timeout monitoring on an
+                # already-open position. ``_maybe_close`` handles the
+                # ``pred is None`` branch (stop-loss / timeout still fire).
+                log.warning("live: predict(%s) failed during exit check: %s", symbol, e)
             return None
         if not preds:
             return None
