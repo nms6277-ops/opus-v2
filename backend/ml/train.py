@@ -102,23 +102,44 @@ def _xy(
     X_cols: list[str] = list(feats)
     if use_symbol_feature:
         X_cols = ["_symbol_id"] + X_cols
-    X = df_valid.select(X_cols).to_numpy().astype(np.float32, copy=False)
-    # ``LGBM_DatasetCreateFromMat`` reads the matrix as row-major. polars'
-    # ``.to_numpy()`` for multi-column frames sometimes returns Fortran-
-    # ordered (column-major) on Windows, which causes the C side to walk
-    # past the allocated buffer and crash with a NULL-pointer access
-    # violation. Force C-contiguous before passing to LightGBM. ``np.
-    # ascontiguousarray`` is a no-op when the array is already C-order.
-    X = np.ascontiguousarray(X)
+
+    # Build the matrix column-by-column into a pre-allocated C-order
+    # float32 buffer rather than going through polars' ``.to_numpy() +
+    # np.ascontiguousarray``. The latter doubles peak memory because
+    # polars' multi-column ``.to_numpy()`` may return a Fortran-ordered
+    # view on Windows; the subsequent ``np.ascontiguousarray`` then has
+    # to allocate a second 1+ GiB buffer (transient OOM for users with
+    # 16 GB RAM training on ~3M-row datasets). The column-by-column path
+    # makes exactly ONE allocation of the final size and casts each
+    # column's data as it copies. ``LGBM_DatasetCreateFromMat`` requires
+    # row-major, which a freshly-allocated ``np.empty(..., order='C')``
+    # satisfies by construction.
+    n_rows = df_valid.height
+    n_cols = len(X_cols)
+    X = np.empty((n_rows, n_cols), dtype=np.float32, order="C")
+    for j, col_name in enumerate(X_cols):
+        # ``Series.to_numpy()`` for a single column returns a 1-D
+        # contiguous array; the assignment downcasts to float32 in the
+        # destination buffer (NumPy handles the cast safely for finite
+        # values; NaN/Inf are sanitized below). Per-column transient
+        # memory is at most ``n_rows * 8 bytes`` (~16 MiB at 2M rows).
+        X[:, j] = df_valid[col_name].to_numpy()
+
+    y = df_valid[y_col].to_numpy().astype(np.int8, copy=False)
+    # Drop the polars frame as soon as we have plain numpy arrays so the
+    # caller sees the memory back before the next ``_xy`` call (val set)
+    # or the next horizon's training run.
+    del df_valid
+
     # NaN / Inf in features cause access-violation crashes in some
     # LightGBM Windows builds (instead of being silently bin-encoded as
     # missing). Replace with finite sentinels: NaN -> 0.0 (LightGBM
     # treats it as "missing" later via use_missing=True anyway), +/-Inf
     # capped at the float32 representable range. Hot path is unchanged
-    # (no pandas, no per-row Python).
+    # (no pandas, no per-row Python). The ``np.all(np.isfinite)`` check
+    # short-circuits the rewrite when no replacement is needed.
     if not np.all(np.isfinite(X)):
         np.nan_to_num(X, copy=False, nan=0.0, posinf=3.4e38, neginf=-3.4e38)
-    y = df_valid[y_col].to_numpy().astype(np.int8, copy=False)
 
     # Class-balanced weights (helps when FLAT dominates after threshold).
     w = np.ones_like(y, dtype=np.float32)
