@@ -115,13 +115,17 @@ def discover(
 
     wanted = {s.upper() for s in symbols} if symbols else None
     out: dict[str, list[SymbolFile]] = {}
+    # Pre-enumerate every parquet path so we can emit a progress log during
+    # the metadata-and-ts_ms scan. On Windows NTFS with thousands of small
+    # files this scan can silently run for minutes; without a progress log
+    # operators think the process hung.
+    candidates: list[tuple[str, Path]] = []
     for sym_dir in sorted(snapshots_root.iterdir()):
         if not sym_dir.is_dir():
             continue
         sym = sym_dir.name.upper()
         if wanted is not None and sym not in wanted:
             continue
-        files: list[SymbolFile] = []
         for date_dir in sorted(sym_dir.iterdir()):
             if not date_dir.is_dir():
                 continue
@@ -131,12 +135,18 @@ def discover(
             if to_date is not None and d > to_date:
                 continue
             for parquet in sorted(date_dir.glob("*.parquet")):
-                rows, lo, hi = _parquet_metadata(parquet)
-                if rows == 0:
-                    continue
-                files.append(SymbolFile(sym, parquet, rows, lo, hi))
-        if files:
-            out[sym] = files
+                candidates.append((sym, parquet))
+
+    total = len(candidates)
+    if total:
+        log.info("dataset: discovering %d parquet files ...", total)
+    next_log = max(1, total // 20)  # ~5% increments, at least every file
+    for i, (sym, parquet) in enumerate(candidates, start=1):
+        rows, lo, hi = _parquet_metadata(parquet)
+        if rows > 0:
+            out.setdefault(sym, []).append(SymbolFile(sym, parquet, rows, lo, hi))
+        if i % next_log == 0 or i == total:
+            log.info("dataset: scanned %d / %d files", i, total)
 
     return [SymbolFiles(sym, fs) for sym, fs in sorted(out.items())]
 
