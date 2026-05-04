@@ -401,7 +401,7 @@ class LiveTrader(Trader):
                 f"{self.runtime_settings.min_expected_gross_bp:.2f}bp"
             )
             return
-        if abs(float(pred.confidence)) < settings.trade_conf_threshold:
+        if abs(float(pred.confidence)) < self._conf_thr:
             return
 
         side = "BUY" if pred.confidence > 0 else "SELL"
@@ -441,7 +441,18 @@ class LiveTrader(Trader):
             self._reject_symbol(symbol, reason)
             return
 
-        await self._ensure_leverage(symbol)
+        try:
+            await self._ensure_leverage(symbol)
+        except Exception as e:
+            # A REST failure on ``set_leverage`` (network, 418 rate-limit,
+            # 4xx) used to propagate up to the snapshot loop where it was
+            # logged generically and silently swallowed. The symbol then
+            # had no ``block_reason`` / ``rejects_count`` update, so the UI
+            # showed nothing while every snapshot kept retrying. Treat it
+            # the same as ``place_order`` failure: reject the symbol so
+            # the operator gets actionable feedback.
+            self._reject_symbol(symbol, f"set leverage failed: {e}")
+            return
         client_order_id = f"OPUS_{symbol}_{int(time.time() * 1000)}_{side}"
         try:
             await self.rest.place_order(

@@ -89,3 +89,30 @@ async def test_set_symbol_execution_mode_live_does_not_call_flatten(monkeypatch)
     assert state.symbols["UBUSDT"].execution_mode == "live"
     assert fake_live.flatten_calls == []
     assert fake_live.cancel_calls == []
+
+
+@pytest.mark.asyncio
+async def test_set_runtime_settings_propagates_to_paper_trader(tmp_path, monkeypatch):
+    """`POST /api/settings` must update PaperTrader.runtime_settings too,
+    not just LiveTrader. Otherwise regime-guard tuning (loss_streak_limit /
+    rolling_* / *_giveback_pct) is silently inert in PAPER mode."""
+
+    from backend.settings_store import RuntimeSettings, SettingsHardCaps, SettingsStore
+
+    class _PaperLike:
+        """Stand-in with the same attribute shape as PaperTrader."""
+
+        def __init__(self):
+            self.runtime_settings = RuntimeSettings(loss_streak_limit=4)
+
+    state = _state_with("UBUSDT")
+    rt = Runtime.__new__(Runtime)
+    rt.state = state
+    rt.runtime_settings = RuntimeSettings(loss_streak_limit=4)
+    rt.settings_store = SettingsStore(path=tmp_path / "rt.json", hard_caps=SettingsHardCaps())
+    rt._trader = _PaperLike()
+
+    await rt.set_runtime_settings({"loss_streak_limit": 7})
+
+    assert rt.runtime_settings.loss_streak_limit == 7
+    assert rt._trader.runtime_settings.loss_streak_limit == 7

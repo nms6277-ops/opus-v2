@@ -414,8 +414,15 @@ class Runtime:
         g.loss_12h_limit_usd = self.runtime_settings.loss_12h_limit_usd
         g.symbol_loss_limit_usd = self.runtime_settings.symbol_loss_limit_usd
         g.max_live_symbols = self.runtime_settings.max_live_symbols
-        if isinstance(self._trader, LiveTrader):
-            self._trader.runtime_settings = self.runtime_settings
+        # Propagate the new settings to BOTH trader types. Originally only
+        # LiveTrader was wired up, which silently broke regime-guard tuning
+        # in PAPER mode: the operator could change ``loss_streak_limit``,
+        # ``rolling_*`` thresholds, ``*_profit_giveback_pct`` etc. via the
+        # UI but ``record_trade_outcome`` inside PaperTrader still used the
+        # stale RuntimeSettings frozen at construction time.
+        trader = self._trader
+        if hasattr(trader, "runtime_settings"):
+            trader.runtime_settings = self.runtime_settings
         return self.runtime_settings_dict()
 
     async def set_symbol_execution_mode(self, symbol: str, execution_mode: str) -> dict:

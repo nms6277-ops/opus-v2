@@ -946,3 +946,55 @@ async def test_close_order_pnl_cleared_on_canceled_reduce_only():
         }
     )
     assert ("UBUSDT", "OPUS_SL_UBUSDT_1") not in trader._close_order_pnl
+
+
+@pytest.mark.asyncio
+async def test_set_leverage_failure_rejects_symbol_not_crash():
+    """A REST failure on set_leverage must reject the symbol cleanly with a
+    block_reason / rejects_count update, NOT propagate up to the snapshot
+    loop where it surfaces as an opaque generic error."""
+
+    state = _state_with_symbol(live=True)
+
+    class _BoomRest(FakeRest):
+        async def set_leverage(self, symbol, leverage):
+            raise RuntimeError("Binance POST /fapi/v1/leverage failed 418: rate limited")
+
+    rest = _BoomRest()
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    await trader.start()
+
+    await trader.on_snapshot("UBUSDT", _snap())
+
+    # No order should have been placed.
+    assert rest.orders == []
+    # Symbol should have a clear, actionable block_reason in the UI.
+    assert state.symbols["UBUSDT"].rejects_count == 1
+    assert "set leverage failed" in state.symbols["UBUSDT"].block_reason
+    assert "rate limited" in state.symbols["UBUSDT"].block_reason
+
+
+@pytest.mark.asyncio
+async def test_entry_uses_instance_conf_threshold_not_module_settings():
+    """Entry gate must read self._conf_thr (snapshot of settings at __init__)
+    instead of the module-level ``settings.trade_conf_threshold``. Otherwise
+    a hot-reload / monkeypatch of settings would only take effect in the
+    exit gate, splitting entry vs exit thresholds."""
+
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+    trader = LiveTrader(
+        state, predictor=FakePredictor(confidence=0.05), rest_client=rest, runtime_settings=RuntimeSettings()
+    )
+    # Force the instance threshold high enough that the prediction (0.05)
+    # cannot pass. If the entry gate were still reading module-level
+    # settings, this monkey-patch would be invisible and an order would
+    # still go through.
+    trader._conf_thr = 0.5
+    await trader.start()
+
+    await trader.on_snapshot("UBUSDT", _snap())
+
+    assert rest.orders == [], "instance threshold must gate the entry decision"
