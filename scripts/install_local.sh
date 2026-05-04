@@ -26,7 +26,7 @@ fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 python -m pip install --upgrade pip wheel
-pip install -e '.[dev]'
+pip install -e '.[dev,ml]'
 
 if [[ ! -f .env ]]; then
     echo "[opus] creating .env from .env.example"

@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import hmac
 import time
+from decimal import Decimal
 from typing import Any
 from urllib.parse import urlencode
 
@@ -23,6 +24,30 @@ import httpx
 from backend.config import settings
 from backend.exchanges.binance_filters import SymbolFilters, parse_symbol_filters
 from backend.log import get_logger
+
+
+def _fmt_decimal(value: float, precision: int = 8) -> str:
+    """Format a float for Binance order fields WITHOUT scientific notation.
+
+    Python's default ``f"{x}"`` falls back to scientific notation for small
+    values (e.g. ``f"{9.95e-06}"`` → ``"9.95e-06"``). Binance Futures rejects
+    scientific notation on ``quantity`` / ``price`` / ``stopPrice``. For
+    micro-cap tokens (SHIB ~$0.00001, PEPE ~$0.000008, FLOKI ~$0.00001)
+    every protective STOP_MARKET / TAKE_PROFIT_MARKET would silently fail
+    without this, leaving the live position with no exchange-side safety net.
+
+    8 decimal places is the safe upper bound for Binance Futures; trailing
+    zeros are stripped so ``1.2`` stays ``"1.2"`` and ``0.00001194`` becomes
+    ``"0.00001194"`` instead of ``"1.194e-05"``.
+    """
+    d = Decimal(str(value))
+    formatted = format(d, f".{precision}f")
+    # Strip trailing zeros and a dangling decimal point, but keep at least
+    # the integer portion so "0" stays "0" (not "").
+    if "." in formatted:
+        formatted = formatted.rstrip("0").rstrip(".")
+    return formatted or "0"
+
 
 log = get_logger(__name__)
 
@@ -172,12 +197,12 @@ class BinanceRest:
             "symbol": symbol.upper(),
             "side": side.upper(),
             "type": order_type.upper(),
-            "quantity": f"{quantity}",
+            "quantity": _fmt_decimal(quantity),
         }
         if order_type.upper() == "LIMIT":
             if price is None:
                 raise ValueError("LIMIT order requires price")
-            params["price"] = f"{price}"
+            params["price"] = _fmt_decimal(price)
             params["timeInForce"] = time_in_force
         if order_type.upper() in {
             "STOP",
@@ -187,7 +212,7 @@ class BinanceRest:
         }:
             if stop_price is None:
                 raise ValueError(f"{order_type.upper()} order requires stop_price")
-            params["stopPrice"] = f"{stop_price}"
+            params["stopPrice"] = _fmt_decimal(stop_price)
         if working_type:
             params["workingType"] = working_type
         if reduce_only:

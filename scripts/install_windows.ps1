@@ -59,8 +59,10 @@ if (-not (Test-Path $venvPy)) {
 Write-Host "Upgrading pip + wheel ..." -ForegroundColor Yellow
 & $venvPy -m pip install --upgrade pip wheel | Out-Null
 
-Write-Host "Installing project dependencies ..." -ForegroundColor Yellow
-& $venvPy -m pip install -e ".[dev]"
+Write-Host "Installing project dependencies (including ML extras) ..." -ForegroundColor Yellow
+# ``ml`` is required by the training CLI (backend.ml.train -> lightgbm).
+# ``dev`` ships pytest / ruff for the local workflow.
+& $venvPy -m pip install -e ".[dev,ml]"
 
 # --- Polars compatibility runtime (older CPUs, no AVX/AVX2) -------------------
 Write-Host "Installing Polars compatibility runtime (older CPU safe) ..." -ForegroundColor Yellow
