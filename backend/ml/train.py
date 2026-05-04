@@ -103,6 +103,21 @@ def _xy(
     if use_symbol_feature:
         X_cols = ["_symbol_id"] + X_cols
     X = df_valid.select(X_cols).to_numpy().astype(np.float32, copy=False)
+    # ``LGBM_DatasetCreateFromMat`` reads the matrix as row-major. polars'
+    # ``.to_numpy()`` for multi-column frames sometimes returns Fortran-
+    # ordered (column-major) on Windows, which causes the C side to walk
+    # past the allocated buffer and crash with a NULL-pointer access
+    # violation. Force C-contiguous before passing to LightGBM. ``np.
+    # ascontiguousarray`` is a no-op when the array is already C-order.
+    X = np.ascontiguousarray(X)
+    # NaN / Inf in features cause access-violation crashes in some
+    # LightGBM Windows builds (instead of being silently bin-encoded as
+    # missing). Replace with finite sentinels: NaN -> 0.0 (LightGBM
+    # treats it as "missing" later via use_missing=True anyway), +/-Inf
+    # capped at the float32 representable range. Hot path is unchanged
+    # (no pandas, no per-row Python).
+    if not np.all(np.isfinite(X)):
+        np.nan_to_num(X, copy=False, nan=0.0, posinf=3.4e38, neginf=-3.4e38)
     y = df_valid[y_col].to_numpy().astype(np.int8, copy=False)
 
     # Class-balanced weights (helps when FLAT dominates after threshold).

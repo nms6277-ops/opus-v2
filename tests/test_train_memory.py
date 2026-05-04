@@ -24,6 +24,27 @@ def test_xy_uses_float32_feature_matrix():
     assert w.dtype == np.float32
 
 
+def test_xy_returns_c_contiguous_finite_matrix():
+    """Guard against the LightGBM Windows access-violation: matrices must
+    be C-contiguous and free of NaN/Inf before reaching
+    ``LGBM_DatasetCreateFromMat``."""
+
+    df = pl.DataFrame(
+        {
+            "part": ["train", "train", "train", "train"],
+            "y_1s_valid": [True, True, True, True],
+            "y_1s": [0, 2, 1, 0],
+            "feature_a": [1.0, float("nan"), 3.0, float("inf")],
+            "feature_b": [float("-inf"), 2.0, float("nan"), 4.0],
+        }
+    )
+
+    X, _, _ = _xy(df, ["feature_a", "feature_b"], "1s", use_symbol_feature=False)
+
+    assert X.flags["C_CONTIGUOUS"], "LightGBM expects row-major (C-order)"
+    assert np.all(np.isfinite(X)), "NaN / Inf must be sanitized before LightGBM"
+
+
 def test_compact_training_frame_keeps_only_training_and_eval_columns():
     df = pl.DataFrame(
         {
