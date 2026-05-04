@@ -306,19 +306,20 @@ class Predictor:
         global_root = self.model_dir / "global"
         if global_root.is_dir() and any(
             (global_root / p.name).is_dir() and (global_root / p.name / "model.lgb").exists()
-            for p in global_root.iterdir() if p.name.startswith("h")
+            for p in global_root.iterdir()
+            if p.name.startswith("h")
         ):
             log.info(
                 "inference: resolved model_dir %s -> %s (auto-detected global/ subfolder)",
-                self.model_dir, global_root,
+                self.model_dir,
+                global_root,
             )
             self.model_dir = global_root
 
         # Auto-discover horizons from sub-dirs if none specified.
         if horizons is None:
             horizons = tuple(
-                p.name[1:] for p in sorted(self.model_dir.iterdir())
-                if p.is_dir() and p.name.startswith("h")
+                p.name[1:] for p in sorted(self.model_dir.iterdir()) if p.is_dir() and p.name.startswith("h")
             )
         self._available_horizons = []
         for h in horizons:
@@ -421,8 +422,7 @@ class Predictor:
         hist = self._histories[symbol]
         if hist.size < max(LAG_STEPS) + 2:
             if symbol not in self._cold_warned:
-                log.info("inference: %s warming up (%d / %d rows)",
-                         symbol, hist.size, max(LAG_STEPS) + 2)
+                log.info("inference: %s warming up (%d / %d rows)", symbol, hist.size, max(LAG_STEPS) + 2)
                 self._cold_warned.add(symbol)
             return None
 

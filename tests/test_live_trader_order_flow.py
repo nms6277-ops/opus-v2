@@ -861,3 +861,88 @@ async def test_on_snapshot_warms_predictor_when_symbol_paper():
     await trader.on_snapshot("UBUSDT", _snap())
     assert pred.update_calls == 1
     assert rest.orders == []
+
+
+@pytest.mark.asyncio
+async def test_live_trader_reapplies_leverage_after_runtime_setting_change():
+    """Operator lowers leverage in the UI; the LiveTrader must push the new
+    value to Binance instead of silently short-circuiting because the symbol
+    is already in the cache."""
+
+    state = _state_with_symbol(live=True)
+    rest = FakeRest()
+    settings = RuntimeSettings(leverage=10)
+    trader = LiveTrader(state, predictor=FakePredictor(), rest_client=rest, runtime_settings=settings)
+    await trader.start()
+
+    await trader.on_snapshot("UBUSDT", _snap())
+    assert rest.leverage_calls == [("UBUSDT", 10.0)]
+
+    # Close the open position so the next snapshot takes the entry path again.
+    trader._positions.pop("UBUSDT", None)
+    state.symbols["UBUSDT"].position_base = 0.0
+
+    # Operator reduces leverage via the UI.
+    trader.runtime_settings = RuntimeSettings(leverage=3)
+    await trader.on_snapshot("UBUSDT", _snap())
+
+    assert rest.leverage_calls[-1] == ("UBUSDT", 3.0), rest.leverage_calls
+
+    # Same leverage on a second snapshot must NOT resubmit.
+    trader._positions.pop("UBUSDT", None)
+    state.symbols["UBUSDT"].position_base = 0.0
+    calls_before = len(rest.leverage_calls)
+    await trader.on_snapshot("UBUSDT", _snap())
+    assert len(rest.leverage_calls) == calls_before
+
+
+@pytest.mark.asyncio
+async def test_close_order_pnl_cleared_on_canceled_reduce_only():
+    """Partial-filled reduce-only order that is later CANCELED must not
+    leak a ``_close_order_pnl`` entry — otherwise 24/7 operation drifts
+    unbounded against the 2 GB VPS memory budget."""
+
+    state = _state_with_symbol(live=True)
+    trader = LiveTrader(
+        state, predictor=FakePredictor(), rest_client=FakeRest(), runtime_settings=RuntimeSettings()
+    )
+
+    # Partial fill on a reduce-only STOP order.
+    trader.on_order_update(
+        {
+            "o": {
+                "s": "UBUSDT",
+                "S": "SELL",
+                "X": "PARTIALLY_FILLED",
+                "x": "TRADE",
+                "c": "OPUS_SL_UBUSDT_1",
+                "i": 111,
+                "t": "T1",
+                "R": True,
+                "z": 1.0,
+                "ap": 1.0,
+                "rp": -0.01,
+            }
+        }
+    )
+    assert ("UBUSDT", "OPUS_SL_UBUSDT_1") in trader._close_order_pnl
+
+    # Order then gets CANCELED before it finishes.
+    trader.on_order_update(
+        {
+            "o": {
+                "s": "UBUSDT",
+                "S": "SELL",
+                "X": "CANCELED",
+                "x": "CANCELED",
+                "c": "OPUS_SL_UBUSDT_1",
+                "i": 111,
+                "t": "T2",
+                "R": True,
+                "z": 1.0,
+                "ap": 1.0,
+                "rp": 0.0,
+            }
+        }
+    )
+    assert ("UBUSDT", "OPUS_SL_UBUSDT_1") not in trader._close_order_pnl

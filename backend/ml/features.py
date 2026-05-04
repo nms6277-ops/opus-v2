@@ -81,17 +81,13 @@ def _derived_for_one_symbol(sym_df: pl.DataFrame) -> pl.DataFrame:
     for lag in LAG_STEPS:
         prev_mid = mid_safe.shift(lag)
         new_cols.append(
-            ((mid_safe - prev_mid) / prev_mid * 10_000.0)
-            .alias(f"mid_ret_lag{lag}_bp")
-            .cast(pl.Float32)
+            ((mid_safe - prev_mid) / prev_mid * 10_000.0).alias(f"mid_ret_lag{lag}_bp").cast(pl.Float32)
         )
 
     # --- rolling realised volatility of 1-step returns (bp) -------------------
     ret_1 = (mid_safe - mid_safe.shift(1)) / mid_safe.shift(1) * 10_000.0
     for w in ROLL_WINDOWS:
-        new_cols.append(
-            ret_1.rolling_std(window_size=w).alias(f"vol_w{w}_bp").cast(pl.Float32)
-        )
+        new_cols.append(ret_1.rolling_std(window_size=w).alias(f"vol_w{w}_bp").cast(pl.Float32))
 
     # --- microprice deviation from mid (in bp) --------------------------------
     new_cols.append(
@@ -116,23 +112,17 @@ def _derived_for_one_symbol(sym_df: pl.DataFrame) -> pl.DataFrame:
     ba_q_prev = ba_q.shift(1)
 
     bid_ofi = (
-        pl.when(bb == bb_prev).then(bb_q - bb_q_prev)
-        .when(bb > bb_prev).then(bb_q)
-        .otherwise(-bb_q_prev)
+        pl.when(bb == bb_prev).then(bb_q - bb_q_prev).when(bb > bb_prev).then(bb_q).otherwise(-bb_q_prev)
     )
     ask_ofi = (
-        pl.when(ba == ba_prev).then(-(ba_q - ba_q_prev))
-        .when(ba < ba_prev).then(-ba_q)
-        .otherwise(ba_q_prev)
+        pl.when(ba == ba_prev).then(-(ba_q - ba_q_prev)).when(ba < ba_prev).then(-ba_q).otherwise(ba_q_prev)
     )
     ofi = (bid_ofi + ask_ofi).fill_null(0.0)
     new_cols.append(ofi.alias("ofi_top1").cast(pl.Float32))
 
     # --- rolling OFI (more stable signal) -------------------------------------
     for w in ROLL_WINDOWS:
-        new_cols.append(
-            ofi.rolling_sum(window_size=w).alias(f"ofi_top1_sum_w{w}").cast(pl.Float32)
-        )
+        new_cols.append(ofi.rolling_sum(window_size=w).alias(f"ofi_top1_sum_w{w}").cast(pl.Float32))
 
     # --- spread normalised by rolling median spread ---------------------------
     spr = pl.col("spread_bp").cast(pl.Float64)
@@ -144,14 +134,18 @@ def _derived_for_one_symbol(sym_df: pl.DataFrame) -> pl.DataFrame:
     # If the book is concentrated near mid, inner/outer >> 1 (firm support).
     # If thin near mid (price likely to whip), inner/outer << 1.
     new_cols.append(
-        ((pl.col("bid_bkt_qty_05bp") + pl.col("ask_bkt_qty_05bp"))
-         / (pl.col("bid_bkt_qty_50bp") + pl.col("ask_bkt_qty_50bp") + eps))
+        (
+            (pl.col("bid_bkt_qty_05bp") + pl.col("ask_bkt_qty_05bp"))
+            / (pl.col("bid_bkt_qty_50bp") + pl.col("ask_bkt_qty_50bp") + eps)
+        )
         .alias("bkt_concentration_5_50")
         .cast(pl.Float32)
     )
     new_cols.append(
-        ((pl.col("bid_bkt_qty_10bp") + pl.col("ask_bkt_qty_10bp"))
-         / (pl.col("bid_bkt_qty_50bp") + pl.col("ask_bkt_qty_50bp") + eps))
+        (
+            (pl.col("bid_bkt_qty_10bp") + pl.col("ask_bkt_qty_10bp"))
+            / (pl.col("bid_bkt_qty_50bp") + pl.col("ask_bkt_qty_50bp") + eps)
+        )
         .alias("bkt_concentration_10_50")
         .cast(pl.Float32)
     )

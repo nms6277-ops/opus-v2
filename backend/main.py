@@ -50,12 +50,14 @@ app.include_router(ws.router)
 
 
 if FRONTEND_DIR.exists():
+
     @app.get("/", include_in_schema=False)
     async def index() -> FileResponse:
         return FileResponse(FRONTEND_DIR / "index.html")
 
     app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 else:
+
     @app.get("/", include_in_schema=False)
     async def index() -> JSONResponse:  # pragma: no cover
         return JSONResponse({"message": "frontend not found", "api": "/api/status"})

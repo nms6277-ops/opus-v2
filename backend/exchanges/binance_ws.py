@@ -119,12 +119,8 @@ class BinanceWS:
     async def start(self, symbols: list[str]) -> None:
         self._symbols = {s.upper() for s in symbols}
         self._stopped = False
-        self._tasks[_PUBLIC] = asyncio.create_task(
-            self._run_channel(_PUBLIC), name="binance-ws-public"
-        )
-        self._tasks[_MARKET] = asyncio.create_task(
-            self._run_channel(_MARKET), name="binance-ws-market"
-        )
+        self._tasks[_PUBLIC] = asyncio.create_task(self._run_channel(_PUBLIC), name="binance-ws-public")
+        self._tasks[_MARKET] = asyncio.create_task(self._run_channel(_MARKET), name="binance-ws-market")
 
     async def stop(self) -> None:
         self._stopped = True
@@ -212,7 +208,8 @@ class BinanceWS:
             try:
                 log.info(
                     "binance-ws[%s] connecting (%d symbols)",
-                    channel, len(self._symbols),
+                    channel,
+                    len(self._symbols),
                 )
                 async with websockets.connect(url, **self._connect_kwargs()) as ws:
                     self._connected[channel] = True
@@ -340,7 +337,9 @@ class BinanceWS:
                     _engage_rest_backoff(retry_after)
                     log.error(
                         "binance-ws rate-limited (HTTP %d) on %s — backing off %.0fs",
-                        code, symbol, retry_after,
+                        code,
+                        symbol,
+                        retry_after,
                     )
                 else:
                     log.error("binance-ws resync %s HTTP %d: %s", symbol, code, e)

@@ -102,7 +102,10 @@ class LiveSymbolRuntime:
             self._cooldown(settings, "consecutive losses limit hit")
             return
 
-        if self.live_state == LiveSymbolState.PROBATION_LIVE and self.live_trade_count >= settings.probation_trades:
+        if (
+            self.live_state == LiveSymbolState.PROBATION_LIVE
+            and self.live_trade_count >= settings.probation_trades
+        ):
             probation_ok = (
                 self.wins >= 4
                 and self.sum_net_bp > 0.0

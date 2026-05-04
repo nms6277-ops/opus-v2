@@ -89,11 +89,16 @@ def record_trade_outcome(
     # touch the streak counter — bumping it would let a run of break-evens
     # prematurely trip the loss-streak cooldown on micro-cap altcoins
     # where the model's edge is 1-3 bp.
-    stats.symbol_realized_pnl_12h += pnl_usd
+    # NOTE: the per-symbol 12h PnL display value is *computed* on demand
+    # from ``guards.pnl_events`` in ``AppState.snapshot`` (same source the
+    # safety check ``symbol_pnl_12h`` uses). Do NOT accumulate it here —
+    # a cumulative lifetime counter under the name ``_12h`` misled the UI
+    # and Telegram digest; operators relied on the displayed number for
+    # manual decisions.
     stats.pnl_peak_usd = max(stats.pnl_peak_usd, stats.realized_pnl)
     stats.pnl_drawdown_pct = _drawdown_pct(stats.realized_pnl, stats.pnl_peak_usd)
     stats.recent_trade_net_bp.append(float(net_bp))
-    stats.recent_trade_net_bp = stats.recent_trade_net_bp[-settings.rolling_guard_trades:]
+    stats.recent_trade_net_bp = stats.recent_trade_net_bp[-settings.rolling_guard_trades :]
     wins = sum(1 for x in stats.recent_trade_net_bp if x > 0.0)
     stats.rolling_win_rate = wins / len(stats.recent_trade_net_bp)
     stats.rolling_sum_net_bp = sum(stats.recent_trade_net_bp)
@@ -103,10 +108,7 @@ def record_trade_outcome(
         and g.pnl_peak_usd > 0.0
         and g.pnl_drawdown_pct >= settings.global_profit_giveback_pct
     ):
-        reason = (
-            f"global profit giveback {g.pnl_drawdown_pct * 100:.1f}% "
-            f"from peak ${g.pnl_peak_usd:.4f}"
-        )
+        reason = f"global profit giveback {g.pnl_drawdown_pct * 100:.1f}% from peak ${g.pnl_peak_usd:.4f}"
         trip_emergency(g, reason)
         event = RiskEvent(
             scope="global",

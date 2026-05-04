@@ -76,7 +76,8 @@ def _resolve_horizon_ms(spec: str) -> int:
         log.error(
             "paper: cannot parse trade_horizon=%r (%s); defaulting to 5000ms. "
             "Set OPUS_TRADE_HORIZON to e.g. 1s, 2s, 5s, 30s, 500ms, 1m.",
-            spec, e,
+            spec,
+            e,
         )
         return 5_000
 
@@ -86,7 +87,7 @@ class OpenPosition:
     """One open paper-trade leg per symbol."""
 
     symbol: str
-    side: str               # "long" | "short"
+    side: str  # "long" | "short"
     qty: float
     notional_usd: float
     entry_price: float
@@ -271,7 +272,12 @@ class PaperTrader(Trader):
 
         log.info(
             "paper: OPEN %s %s qty=%.6f @ %.6f conf=%+.3f horizon=%s",
-            side, symbol, qty, entry_price, pred.confidence, self._horizon,
+            side,
+            symbol,
+            qty,
+            entry_price,
+            pred.confidence,
+            self._horizon,
         )
 
     async def _maybe_close(self, symbol: str, snap: dict, pred) -> None:
@@ -329,9 +335,13 @@ class PaperTrader(Trader):
         # Fall back to last known mid from state if exit_price missing.
         if exit_price is None or exit_price <= 0:
             stats = self.state.symbols.get(symbol)
-            exit_price = stats.best_bid if (stats and pos.side == "long" and stats.best_bid > 0) \
-                else stats.best_ask if (stats and pos.side == "short" and stats.best_ask > 0) \
+            exit_price = (
+                stats.best_bid
+                if (stats and pos.side == "long" and stats.best_bid > 0)
+                else stats.best_ask
+                if (stats and pos.side == "short" and stats.best_ask > 0)
                 else pos.entry_price
+            )
         gross_bp = self._gross_pnl_bp(pos, float(exit_price))
         fee_bp = 2.0 * self._taker_fee_bp
         net_bp = gross_bp - fee_bp
@@ -367,7 +377,13 @@ class PaperTrader(Trader):
 
         log.info(
             "paper: CLOSE %s %s @ %.6f gross=%+.2fbp net=%+.2fbp pnl=$%+.4f reason=%s",
-            pos.side, symbol, exit_price, gross_bp, net_bp, pnl_usd, exit_reason,
+            pos.side,
+            symbol,
+            exit_price,
+            gross_bp,
+            net_bp,
+            pnl_usd,
+            exit_reason,
         )
 
         if self.trade_log is not None:

@@ -58,7 +58,10 @@ class SymbolStats:
     pnl_drawdown_pct: float = 0.0
     rolling_win_rate: float = 1.0
     rolling_sum_net_bp: float = 0.0
-    symbol_realized_pnl_12h: float = 0.0
+    # ``symbol_realized_pnl_12h`` is NOT stored on the dataclass; it is
+    # computed on demand from ``Guards.pnl_events`` during
+    # ``AppState.snapshot()`` so the UI value always matches the source
+    # of truth the 12h-loss safety check uses (``symbol_pnl_12h``).
     current_notional_usd: float = 0.0
     expected_gross_bp: float = 0.0
     cooldown_until: float = 0.0
@@ -97,7 +100,6 @@ class SymbolStats:
             "pnl_drawdown_pct": self.pnl_drawdown_pct,
             "rolling_win_rate": self.rolling_win_rate,
             "rolling_sum_net_bp": self.rolling_sum_net_bp,
-            "symbol_realized_pnl_12h": self.symbol_realized_pnl_12h,
             "current_notional_usd": self.current_notional_usd,
             "expected_gross_bp": self.expected_gross_bp,
             "cooldown_until": self.cooldown_until,
@@ -154,6 +156,20 @@ class AppState:
 
     def snapshot(self) -> dict[str, Any]:
         """Serializable snapshot for the UI."""
+        # Compute per-symbol 12h realized PnL from the authoritative
+        # ``guards.pnl_events`` log. Using the same source as the safety
+        # check ``symbol_pnl_12h`` guarantees the UI value can never drift
+        # from what the loss-limit guard actually enforces.
+        cutoff = time.time() - 12 * 3600.0
+        pnl_12h_by_symbol: dict[str, float] = {}
+        for ts, sym, pnl in self.guards.pnl_events:
+            if ts >= cutoff:
+                pnl_12h_by_symbol[sym] = pnl_12h_by_symbol.get(sym, 0.0) + pnl
+        symbol_dicts = []
+        for s in self.symbols.values():
+            d = s.to_dict()
+            d["symbol_realized_pnl_12h"] = pnl_12h_by_symbol.get(s.symbol, 0.0)
+            symbol_dicts.append(d)
         return {
             "mode": self.mode.value,
             "started_at": self.started_at,
@@ -182,7 +198,7 @@ class AppState:
                 "emergency_reason": self.guards.emergency_reason,
                 "risk_events": self.guards.risk_events[-20:],
             },
-            "symbols": [s.to_dict() for s in self.symbols.values()],
+            "symbols": symbol_dicts,
         }
 
 

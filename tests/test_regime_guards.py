@@ -157,3 +157,39 @@ def test_rolling_degradation_triggers_on_low_winrate_and_symbol_drawdown():
     assert stats.rolling_sum_net_bp > -50.0
     assert stats.pnl_drawdown_pct >= 0.10
     assert stats.live_state == "awaiting_operator"
+
+
+def test_symbol_realized_pnl_12h_computed_from_pnl_events_not_accumulated():
+    """The UI's per-symbol 12h PnL must match what the loss-limit guard sees:
+    both are derived from ``guards.pnl_events`` (timestamp-pruned). A parallel
+    lifetime accumulator would silently drift and mislead operators."""
+
+    import time as _t
+
+    state = _state("UBUSDT")
+    state.symbols["BIOUSDT"] = SymbolStats(
+        symbol="BIOUSDT", position_size_usd=6.0, started_at=1.0, added_at=1.0
+    )
+    settings = _settings()
+
+    # Close a losing trade on UBUSDT a few seconds ago -> counted.
+    record_pnl(state.guards, -0.50, symbol="UBUSDT")
+    record_trade_outcome(state, symbol="UBUSDT", pnl_usd=-0.50, net_bp=-50.0, settings=settings)
+
+    # Close a winning trade on BIOUSDT -> counted, separate symbol.
+    record_pnl(state.guards, 0.30, symbol="BIOUSDT")
+    record_trade_outcome(state, symbol="BIOUSDT", pnl_usd=0.30, net_bp=30.0, settings=settings)
+
+    # Forge a stale event on UBUSDT from 24h ago -> must NOT show in 12h value.
+    state.guards.pnl_events.append((_t.time() - 86400.0, "UBUSDT", -999.0))
+
+    snapshot = state.snapshot()
+    by_symbol = {s["symbol"]: s for s in snapshot["symbols"]}
+
+    # UBUSDT has one in-window loss (-0.50); the 24h-old forged event is ignored.
+    assert by_symbol["UBUSDT"]["symbol_realized_pnl_12h"] == -0.50
+    assert by_symbol["BIOUSDT"]["symbol_realized_pnl_12h"] == 0.30
+
+    # The dataclass field must be gone so nothing can resurrect the
+    # lifetime-accumulator bug by writing to it.
+    assert not hasattr(state.symbols["UBUSDT"], "symbol_realized_pnl_12h")

@@ -55,9 +55,7 @@ async def test_set_symbol_execution_mode_paper_flattens_live_position(monkeypatc
     assert result["execution_mode"] == "paper"
     assert state.symbols["UBUSDT"].execution_mode == "paper"
     assert state.symbols["UBUSDT"].live_state == "paper"
-    assert fake_live.flatten_calls == ["UBUSDT"], (
-        "live->paper switch must flatten the real Binance position"
-    )
+    assert fake_live.flatten_calls == ["UBUSDT"], "live->paper switch must flatten the real Binance position"
 
 
 @pytest.mark.asyncio

@@ -33,21 +33,21 @@ class TradeRecord:
     ts_open_ms: int
     ts_close_ms: int
     symbol: str
-    side: str             # "long" or "short"
+    side: str  # "long" or "short"
     qty: float
     notional_usd: float
     entry_price: float
     exit_price: float
-    pnl_bp: float         # gross (before fees), signed
-    fee_bp: float         # round-trip fee (positive number)
-    net_bp: float         # pnl_bp - fee_bp
-    pnl_usd: float        # net PnL in USD
+    pnl_bp: float  # gross (before fees), signed
+    fee_bp: float  # round-trip fee (positive number)
+    net_bp: float  # pnl_bp - fee_bp
+    pnl_usd: float  # net PnL in USD
     horizon: str
     predicted_confidence: float
     p_up: float
     p_flat: float
     p_down: float
-    exit_reason: str      # "timeout" | "opposing_signal" | "stop_loss" | "manual"
+    exit_reason: str  # "timeout" | "opposing_signal" | "stop_loss" | "manual"
     is_maker_entry: bool
     is_maker_exit: bool
 

@@ -80,7 +80,13 @@ class LiveTrader(Trader):
         self._on_risk_event = on_risk_event
         self.live_trade_log = live_trade_log
         self._running = False
-        self._leveraged_symbols: set[str] = set()
+        # Map ``symbol -> last-applied leverage`` so an operator-initiated
+        # leverage change via ``POST /api/settings`` (which updates
+        # ``self.runtime_settings.leverage``) takes effect on the next
+        # entry. A plain set would let the cached "already set" flag
+        # short-circuit ``_ensure_leverage`` and keep the symbol at the
+        # old higher leverage silently — a safety-critical mismatch.
+        self._leveraged_symbols: dict[str, float] = {}
         self._positions: dict[str, _LivePosition] = {}
         self._horizon_ms = _resolve_horizon_ms(settings.trade_horizon)
         self._stop_loss_bp = settings.trade_stop_loss_bp
@@ -231,6 +237,14 @@ class LiveTrader(Trader):
             close_key = (symbol, client_order_id or str(order.get("i") or ""))
             if realized_pnl:
                 self._close_order_pnl[close_key] = self._close_order_pnl.get(close_key, 0.0) + realized_pnl
+            if status in {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED"}:
+                # A reduce-only STOP/TP that partially filled then got
+                # cancelled/expired would leak a ``_close_order_pnl`` entry
+                # forever without this cleanup. Partial-fill PnL was
+                # already recorded individually above via ``record_pnl``,
+                # so discarding the accumulator is the correct action.
+                self._close_order_pnl.pop(close_key, None)
+                return
             if status == "FILLED":
                 close_pnl = self._close_order_pnl.pop(close_key, realized_pnl)
                 # Always record the outcome on a FILLED reduce-only close,
@@ -677,10 +691,12 @@ class LiveTrader(Trader):
         return abs(float(pred.confidence)) * vol_bp
 
     async def _ensure_leverage(self, symbol: str) -> None:
-        if symbol in self._leveraged_symbols:
+        desired = float(self.runtime_settings.leverage)
+        current = self._leveraged_symbols.get(symbol)
+        if current is not None and abs(current - desired) < 1e-9:
             return
-        await self.rest.set_leverage(symbol, self.runtime_settings.leverage)
-        self._leveraged_symbols.add(symbol)
+        await self.rest.set_leverage(symbol, desired)
+        self._leveraged_symbols[symbol] = desired
 
     async def _flatten(self, symbol: str) -> None:
         # Local tracking is cleared by the caller (``_maybe_close``) or
