@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 
-from backend.api.auth import check_basic_credentials
+from backend.api.auth import check_basic_credentials, ui_auth_enabled
 from backend.config import Mode, settings
 from backend.runtime import get_runtime
 from backend.safety import guards as guards_mod
@@ -25,7 +25,7 @@ _basic = HTTPBasic(auto_error=False)
 
 
 def _auth(creds: Annotated[HTTPBasicCredentials | None, Depends(_basic)]) -> None:
-    if not settings.ui_user and not settings.ui_password:
+    if not ui_auth_enabled():
         return
     if creds is None:
         raise HTTPException(status_code=401, detail="auth required")

@@ -46,3 +46,30 @@ def test_ws_accepts_valid_basic_auth(monkeypatch):
     with _client().websocket_connect("/ws", headers=headers) as websocket:
         first = websocket.receive_json()
         assert first["mode"] in {"collect", "paper", "live"}
+
+
+def test_ws_rejects_empty_password_when_only_user_configured(monkeypatch):
+    """Regression: half-configured auth (user set, password empty) used to
+    accept any empty-password request because ``compare_digest("", "")``
+    is True. We now treat half-configured as misconfigured and refuse all
+    credentials until both are set."""
+
+    monkeypatch.setattr(settings, "ui_user", "operator")
+    monkeypatch.setattr(settings, "ui_password", "")
+
+    headers = {"authorization": _basic("operator", "")}
+    with pytest.raises(WebSocketDisconnect):
+        with _client().websocket_connect("/ws", headers=headers):
+            pass
+
+
+def test_ws_rejects_when_only_password_configured(monkeypatch):
+    """Symmetric guard: only password set, user empty must also reject."""
+
+    monkeypatch.setattr(settings, "ui_user", "")
+    monkeypatch.setattr(settings, "ui_password", "secret")
+
+    headers = {"authorization": _basic("", "secret")}
+    with pytest.raises(WebSocketDisconnect):
+        with _client().websocket_connect("/ws", headers=headers):
+            pass
