@@ -2,6 +2,14 @@
 
 Микроструктурный торговый бот под Binance USDT-M Futures с параллельным сбором данных с Bybit для cross-exchange фичей. Фаза MVP-0: коллектор данных + UI + заглушки paper/live (без ML).
 
+> **Project state:** development paused after the v2 ML experiment.
+> The full briefing is in [`docs/`](docs/README.md):
+> [ARCHITECTURE](docs/ARCHITECTURE.md) ·
+> [CONFIGURATION](docs/CONFIGURATION.md) ·
+> [RESULTS](docs/RESULTS.md) ·
+> [ROADMAP](docs/ROADMAP.md). Read those first if you are returning to
+> the project after a break.
+
 ## Текущий статус (MVP-0)
 
 -   Сбор стакана и aggTrade с Binance Futures по 4-5 монетам одновременно.
